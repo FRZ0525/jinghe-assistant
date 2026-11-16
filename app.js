@@ -151,6 +151,26 @@ function currentServer() {
   return state.servers[state.activeServer];
 }
 
+
+function toneIndex(value, modulo) {
+  const text = String(value || "");
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash) % modulo;
+}
+
+function nameBadge(value, fallback) {
+  const compactName = String(value || "").trim().replace(/[\s_-]+/g, "");
+  if (!compactName) return fallback;
+  const characters = Array.from(compactName);
+  if (/^[a-z0-9]$/i.test(characters[0])) {
+    return characters.slice(0, 2).join("").toUpperCase();
+  }
+  return characters[0];
+}
+
 function make(tag, className, ...children) {
   const element = document.createElement(tag);
   if (className) element.className = className;
@@ -202,7 +222,7 @@ function recordCompletion(changes, message) {
       const entry = records(ref);
       const target = ref.raid ? entry.raid : entry.character;
       if (!target || !Object.entries(after).every(([field, value]) => target[field] === value)) continue;
-      if (before.remaining > entry.server.maxAttempts) continue;
+      if (ref.raid && before.remaining > Tracker.raidLimit(entry.server, entry.raid)) continue;
       Object.assign(target, before);
       restored += 1;
     }
@@ -391,10 +411,16 @@ function staminaButton(account, zone, character, content) {
 }
 
 function characterIdentity(character) {
-  return make("span", "character-identity",
-    make("span", "entry-kind entry-kind--character", "角色"),
+  const identity = make("span", "character-identity",
+    make("span", "character-avatar", nameBadge(character.name, "角")),
     make("strong", "character-name", character.name)
   );
+  const profile = [
+    character.level && "等级 " + character.level,
+    character.power && "战力 " + character.power,
+  ].filter(Boolean);
+  if (profile.length) identity.append(make("small", "character-details", profile.join(" · ")));
+  return identity;
 }
 
 function isPendingRaid(raid) {
@@ -415,7 +441,8 @@ function characterActions(account, zone, character) {
     : make("div", "character-actions", staminaButton(account, zone, character, "体力"), menu);
 }
 
-function renderRaid(account, zone, character, raid, maxAttempts) {
+function renderRaid(account, zone, character, raid, defaultMaximum) {
+  const maxAttempts = Tracker.raidLimit(defaultMaximum, raid);
   const data = { ...entryData(account, zone, character), raid: raid.name };
   const label = entryName(account, zone, character) + " " + raid.name;
   const toggle = taskButton(raid.name, "raid-toggle", { ...data, action: "raid" }, raid.doneToday);
@@ -446,11 +473,12 @@ function renderRaid(account, zone, character, raid, maxAttempts) {
 
 function renderCharacter(account, zone, character, maxAttempts) {
   const actions = characterActions(account, zone, character);
+  const tone = "character-tone-" + toneIndex(character.id, 8);
   if (currentTool() === "stamina") {
-    return make("div", "stamina-row", staminaButton(account, zone, character, characterIdentity(character)), actions);
+    return make("div", "stamina-row " + tone, staminaButton(account, zone, character, characterIdentity(character)), actions);
   }
   const raids = currentFilter() === "raid" ? character.raids.filter(isPendingRaid) : character.raids;
-  return make("div", "character-card",
+  return make("div", "character-card " + tone,
     make("div", "character-header", characterIdentity(character), actions),
     make("div", "raid-list", ...raids.map((raid) => renderRaid(account, zone, character, raid, maxAttempts)))
   );
@@ -496,12 +524,12 @@ function renderAccount(account, zones, maxAttempts, index) {
   const indicator = make("span", "fold-indicator");
   indicator.setAttribute("aria-hidden", "true");
   heading.append(
-    indicator,
+    make("span", "account-avatar", nameBadge(account.name, "号")),
     make("span", "account-name-line",
-      make("span", "entry-kind entry-kind--account", "账号"),
       make("strong", "account-name", account.name)
     ),
-    make("small", "", accountProgress(account, collapsed))
+    make("small", "", accountProgress(account, collapsed)),
+    indicator
   );
   heading.setAttribute("aria-expanded", String(!collapsed));
   heading.setAttribute("aria-controls", contentId);
@@ -529,7 +557,7 @@ function renderAccount(account, zones, maxAttempts, index) {
   if (!zones.length) content.append(make("p", "account-note", "添加区服后即可管理角色。"));
   content.id = contentId;
   content.hidden = collapsed;
-  const card = make("article", "account-card", header, content);
+  const card = make("article", "account-card account-tone-" + (index % 6), header, content);
   card.setAttribute("aria-label", "账号 " + account.name);
   return card;
 }
@@ -888,7 +916,7 @@ function toggleCompletion(ref, record) {
   if (ref.raid) {
     if (!raid || (!raid.doneToday && raid.remaining <= 0)) return;
     const doneToday = !raid.doneToday;
-    const remaining = doneToday ? raid.remaining - 1 : Math.min(server.maxAttempts, raid.remaining + 1);
+    const remaining = doneToday ? raid.remaining - 1 : Math.min(Tracker.raidLimit(server, raid), raid.remaining + 1);
     const change = applyRecordChange(ref, raid, { doneToday, remaining });
     recordCompletion([change], doneToday ? "已记录副本完成" : "已取消副本完成标记");
   } else if (character) {
@@ -1093,7 +1121,7 @@ accountList.addEventListener("click", (event) => {
         const { server, raid } = records(ref);
         if (raid) {
           const delta = ref.action === "remaining-plus" ? 1 : -1;
-          raid.remaining = clampRemaining(raid.remaining + delta, server.maxAttempts);
+          raid.remaining = clampRemaining(raid.remaining + delta, Tracker.raidLimit(server, raid));
         }
       });
       break;
@@ -1133,7 +1161,7 @@ accountList.addEventListener("change", (event) => {
   const { raid, server } = records({ ...input.dataset, server: state.activeServer });
   if (!raid) return;
   if (Number.isFinite(input.valueAsNumber)) {
-    raid.remaining = clampRemaining(input.valueAsNumber, server.maxAttempts);
+    raid.remaining = clampRemaining(input.valueAsNumber, Tracker.raidLimit(server, raid));
     saveState();
   }
   input.value = String(raid.remaining);
@@ -1144,7 +1172,7 @@ accountList.addEventListener("change", (event) => {
   const row = input.closest(".raid-row");
   row.querySelector(".raid-toggle").disabled = !raid.doneToday && raid.remaining <= 0;
   row.querySelector("[data-action='remaining-minus']").disabled = raid.remaining <= 0;
-  row.querySelector("[data-action='remaining-plus']").disabled = raid.remaining >= server.maxAttempts;
+  row.querySelector("[data-action='remaining-plus']").disabled = raid.remaining >= Tracker.raidLimit(server, raid);
   renderMetrics();
 });
 
@@ -1373,3 +1401,17 @@ setInterval(updateDay, 30000);
 resetAtBoundary();
 if (needsMigration) saveState();
 render();
+
+window.JingheRosterImport.mount({
+  tracker: Tracker,
+  getServer: currentServer,
+  refreshDay: resetAtBoundary,
+  commit(server) {
+    state.servers[state.activeServer] = server;
+    changeFilter("all");
+    const saved = saveState();
+    render();
+    return saved;
+  },
+  notice: showToast,
+});

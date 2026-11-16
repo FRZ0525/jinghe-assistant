@@ -3,20 +3,30 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#F3F5F7">
+  <meta name="theme-color" content="#7b67ca">
   <meta name="description" content="记录晶核常规服和赛季服的副本次数与每日体力。">
   <title>晶核助手</title>
-  <link rel="stylesheet" href="./styles.css?v=2ee891b3e52c">
-  <script src="./tracker.js?v=ecd5bcd0293b" defer></script>
-  <script src="./app.js?v=a844b06e43a2" defer></script>
+  <link rel="icon" href="./assets/app-icon.png">
+  <link rel="stylesheet" href="./styles.css?v=5cfdbd083ca9">
+  <script src="./tracker.js?v=36c107966e14" defer></script>
+  <script src="./roster-ocr.js?v=e3010aa2e6b0" defer></script>
+  <script src="./roster-layout.js?v=31abbfd7d131" defer></script>
+  <script src="./roster-import.js?v=2c25c66ed2a0" defer></script>
+  <script src="./app.js?v=52dab0064a81" defer></script>
 </head>
 <body data-server="regular">
   <div class="app-shell">
     <header class="topbar">
+      <div class="hero-sparkles" aria-hidden="true">
+        <span>✦</span><span>♡</span>
+      </div>
       <div class="topbar-inner">
         <div class="brand">
-          <span class="brand-mark" aria-hidden="true"></span>
-          <span class="brand-name">晶核助手</span>
+          <img class="brand-icon" src="./assets/app-icon.png" alt="" width="52" height="52">
+          <div class="brand-copy">
+            <div class="eyebrow"><span class="eyebrow-line"></span>JINGHE RECORD</div>
+            <span class="brand-name">晶核助手</span>
+          </div>
         </div>
         <nav class="server-switch" id="server-nav" aria-label="服务器">
           <button class="server-option" type="button" data-select-server="regular" aria-pressed="true">
@@ -62,6 +72,7 @@
           <div class="section-heading">
             <div class="section-title"><h2 id="accounts-title" tabindex="-1">账号与角色</h2></div>
             <div class="action-group">
+              <button class="button button--secondary" type="button" id="open-roster-import" aria-haspopup="dialog" aria-controls="roster-import-dialog">批量录入</button>
               <button class="button button--primary" type="button" id="add-account">+ 添加账号</button>
             </div>
           </div>
@@ -93,7 +104,7 @@
                 <button class="button button--secondary" type="button" id="open-raid-catalog" aria-haspopup="dialog" aria-controls="raid-catalog-dialog">管理副本</button>
               </div>
               <div class="attempt-control">
-                <span>每副本次数上限</span>
+                <span>默认次数上限</span>
                 <div class="attempt-stepper" aria-label="每副本次数上限">
                   <button type="button" id="decrease-attempts" aria-label="降低次数上限">−</button>
                   <strong id="max-attempts">3</strong>
@@ -192,6 +203,84 @@
       <div class="dialog-actions">
         <button class="button button--secondary" type="button" id="close-batch">取消</button>
         <button class="button button--primary" type="submit" id="batch-confirm" disabled>完成 0 个角色</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog roster-dialog" id="roster-import-dialog" aria-labelledby="roster-import-title" aria-describedby="roster-scope">
+    <div class="dialog-header"><h2 id="roster-import-title">批量录入</h2></div>
+    <p class="dialog-message" id="roster-scope"></p>
+    <form id="roster-import-form">
+      <section class="roster-section" aria-label="截图识别">
+        <div class="roster-source">
+          <label class="dialog-field" for="roster-image-kind">
+            <span>截图类型</span>
+            <select id="roster-image-kind">
+              <option value="account">账号登录</option>
+              <option value="servers">服务器列表</option>
+              <option value="roles" selected>角色选择</option>
+              <option value="raids">挑战统计</option>
+            </select>
+          </label>
+          <label class="dialog-field" for="roster-screenshot">
+            <span>上传截图</span>
+            <input type="file" id="roster-screenshot" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" multiple>
+          </label>
+        </div>
+        <div class="roster-source-actions">
+          <p class="dialog-message">截图在当前浏览器内识别。账号截图仅提取标明的账号，识别后请核对结果。</p>
+          <button class="button button--secondary" type="button" id="recognize-roster">识别截图</button>
+        </div>
+        <p class="dialog-message" id="roster-status" role="status" hidden></p>
+      </section>
+      <section class="roster-section" aria-label="核对录入内容">
+        <div class="dialog-field">
+          <label for="roster-accounts-text">账号名单</label>
+          <small id="roster-accounts-help">每行一个账号。登录截图会填写识别出的脱敏账号。</small>
+          <textarea id="roster-accounts-text" rows="2" aria-describedby="roster-accounts-help" spellcheck="false"></textarea>
+        </div>
+        <div class="roster-destination">
+          <label class="dialog-field" for="roster-account">
+            <span>本批角色归属账号</span>
+            <input type="text" id="roster-account" list="roster-account-options" maxlength="40" autocomplete="off">
+          </label>
+          <datalist id="roster-account-options"></datalist>
+          <label class="dialog-field" for="roster-zone">
+            <span>区服</span>
+            <input type="text" id="roster-zone" list="roster-zone-options" maxlength="40" autocomplete="off">
+          </label>
+          <datalist id="roster-zone-options"></datalist>
+        </div>
+        <label class="dialog-field" for="roster-text">
+          <span>角色清单</span>
+          <small id="roster-role-help">每行一个角色，可选填等级和战力。整批角色使用上面选的账号和区服，也可以在行内写「账号 | 区服 | 角色」。例如：角色名 | 等级:70 | 战力:23.5万</small>
+          <textarea id="roster-text" rows="3" aria-describedby="roster-role-help" spellcheck="false"></textarea>
+        </label>
+        <label class="dialog-field" for="roster-raid-text">
+          <span>团本名单</span>
+          <small id="roster-raid-help">每行一个团本，加入当前服目录。</small>
+          <textarea id="roster-raid-text" rows="2" aria-describedby="roster-raid-help" spellcheck="false"></textarea>
+        </label>
+        <div class="dialog-field">
+          <label for="roster-count-text">团本次数</label>
+          <small id="roster-count-help">每行按「角色 | 团本 | 3/5」填写。跨区录入可写「账号 | 区服 | 角色 | 团本 | 3/5」。</small>
+          <textarea id="roster-count-text" rows="2" aria-describedby="roster-count-help" spellcheck="false"></textarea>
+        </div>
+        <div class="dialog-field">
+          <label for="roster-count-basis">读数含义</label>
+          <select id="roster-count-basis" aria-describedby="roster-count-preview-help">
+            <option value="" selected>请选择读数含义</option>
+            <option value="remaining">截图显示剩余次数</option>
+            <option value="used">截图显示已用次数</option>
+          </select>
+          <small id="roster-count-preview-help">导入只更新预览列出的团本次数。核对后再确认。</small>
+        </div>
+      </section>
+      <div class="roster-preview" id="roster-preview" role="region" aria-label="导入预览" tabindex="0" hidden></div>
+      <div class="dialog-actions roster-actions">
+        <button class="button button--quiet" type="button" id="close-roster-import">关闭</button>
+        <button class="button button--secondary" type="submit" id="preview-roster">预览</button>
+        <button class="button button--primary" type="button" id="apply-roster" disabled>确认导入</button>
       </div>
     </form>
   </dialog>

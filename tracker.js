@@ -11,6 +11,7 @@
   const ATTEMPT_MAX = 10;
   const ACCOUNT_LIMIT = 100;
   const CHARACTER_LIMIT = 1000;
+  const ROSTER_NAME_LIMIT = 40;
   const BACKUP_LIMIT = 4000000;
   const DEFAULT_ZONE_NAME = "默认区";
   const LEGACY_ZONE_ID = "zone-default";
@@ -128,11 +129,21 @@
     return Math.min(ATTEMPT_MAX, Math.max(ATTEMPT_MIN, number));
   }
 
+  function hasRaidLimit(raid) {
+    return Number.isSafeInteger(raid?.maxAttempts) && raid.maxAttempts >= 1;
+  }
+
+  function raidLimit(serverOrNumber, raid) {
+    if (hasRaidLimit(raid)) return raid.maxAttempts;
+    if (typeof serverOrNumber === "number") return clampMax(serverOrNumber, 5);
+    const fallback = getServerDef(serverOrNumber?.serverId).defaultMaxAttempts;
+    return clampMax(serverOrNumber?.maxAttempts, fallback);
+  }
+
   function clampRemaining(maxAttempts, value) {
-    const max = clampMax(maxAttempts, 5);
     const number = Math.floor(Number(value));
     if (!Number.isFinite(number)) return 0;
-    return Math.min(max, Math.max(0, number));
+    return Math.min(maxAttempts, Math.max(0, number));
   }
 
   function normalizeActiveRaids(def, catalog, value, mode) {
@@ -206,6 +217,28 @@
     return typeof value === "string" && value.trim() ? value.trim() : fallback;
   }
 
+  function profileText(value) {
+    return typeof value === "string" || typeof value === "number"
+      ? String(value).normalize("NFKC").trim()
+      : "";
+  }
+
+  function normalizeCharacterProfile(value) {
+    const profile = {};
+    const level = profileText(value?.level);
+    const power = profileText(value?.power)
+      .replace(/萬/g, "万")
+      .replace(/億/g, "亿")
+      .replace(/\s+(?=[万亿兆])/g, "");
+    if (/^\d+$/.test(level) && Number.isSafeInteger(Number(level)) && Number(level) >= 1) {
+      profile.level = Number(level);
+    }
+    if (/^(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?[万亿兆]?$/.test(power)) {
+      profile.power = power;
+    }
+    return profile;
+  }
+
   function normalizeCharacter(source, id, index, activeRaids, maxAttempts) {
     const sourceRaids = Array.isArray(source.raids) ? source.raids : [];
     const byName = new Map();
@@ -217,14 +250,16 @@
       id,
       name: normalizeName(source.name, "角色" + (index + 1)),
       staminaDone: source.staminaDone === true,
+      ...normalizeCharacterProfile(source),
       raids: activeRaids.map(function normalizeRaid(raidName) {
         const existing = byName.get(raidNameKey(raidName));
         return {
           name: raidName,
           remaining: existing
-            ? clampRemaining(maxAttempts, existing.remaining)
+            ? clampRemaining(raidLimit(maxAttempts, existing), existing.remaining)
             : maxAttempts,
           doneToday: existing ? existing.doneToday === true : false,
+          ...(hasRaidLimit(existing) ? { maxAttempts: existing.maxAttempts } : {}),
         };
       }),
     };
@@ -384,7 +419,7 @@
     serverZones(server).forEach(function resetZone(zone) {
       zone.characters.forEach(function resetCharacter(character) {
         character.raids.forEach(function resetRaid(raid) {
-          raid.remaining = server.maxAttempts;
+          raid.remaining = raidLimit(server, raid);
           raid.doneToday = false;
         });
       });
@@ -659,6 +694,292 @@
       .toLocaleLowerCase();
   }
 
+  function readRosterName(value, fallback) {
+    return (typeof value === "string" ? value.trim() : "") || fallback;
+  }
+
+  function validateRosterName(name, label, location) {
+    if (!name) throw new Error(location + "缺少" + label);
+    if (name.length > ROSTER_NAME_LIMIT) {
+      throw new Error(location + label + "最多 " + ROSTER_NAME_LIMIT + " 个字符");
+    }
+    return name;
+  }
+
+  function validateRosterProfile(fields, location) {
+    const profile = normalizeCharacterProfile(fields);
+    if (fields.level !== undefined && profile.level === undefined) {
+      throw new Error(location + "等级须为大于等于 1 的整数");
+    }
+    if (fields.power !== undefined && profile.power === undefined) {
+      throw new Error(location + "战力格式无效，请填写数字，可带小数、千分位逗号或万、亿单位");
+    }
+    return profile;
+  }
+
+  function rosterRow(fields, defaults, location) {
+    return {
+      account: validateRosterName(readRosterName(fields.account, defaults.account), "账号名称", location),
+      zone: validateRosterName(readRosterName(fields.zone, defaults.zone), "区服名称", location),
+      character: validateRosterName(readRosterName(fields.character, ""), "角色名称", location),
+      ...validateRosterProfile(fields, location),
+    };
+  }
+
+  function rosterFields(line, location) {
+    const fields = {};
+    const plain = [];
+    for (const [index, part] of line.split(/[|｜]/).entries()) {
+      const metadata = index > 0 && part.match(/^\s*(等级|战力)\s*[：:]\s*(.*)$/);
+      if (!metadata) {
+        plain.push(part);
+        continue;
+      }
+      const key = metadata[1] === "等级" ? "level" : "power";
+      if (fields[key] !== undefined) throw new Error(location + metadata[1] + "只能填写一次");
+      fields[key] = metadata[2].trim();
+    }
+    return { plain, fields };
+  }
+
+  function parseRosterText(raw, defaults = {}) {
+    const target = {
+      account: readRosterName(defaults?.account, ""),
+      zone: readRosterName(defaults?.zone, DEFAULT_ZONE_NAME),
+    };
+    const rows = [];
+    const lines = String(raw ?? "").split(/\r\n|\n|\r/);
+    let account = target.account;
+    let zone = target.zone;
+
+    for (const [index, line] of lines.entries()) {
+      if (!line.trim()) continue;
+      const location = "第 " + (index + 1) + " 行：";
+      const { plain, fields } = rosterFields(line, location);
+      const text = plain.join("|");
+      const label = plain.length === 1 && text.match(/^\s*(账号|区服|角色名|角色)\s*[：:]\s*(.*)$/);
+      if (label) {
+        const name = label[2].trim();
+        if (label[1] === "账号" || label[1] === "区服") {
+          if (Object.keys(fields).length) throw new Error(location + "等级、战力请填在角色行");
+          validateRosterName(name, label[1] + "名称", location);
+          if (label[1] === "账号") {
+            account = name;
+            zone = target.zone;
+          } else {
+            zone = name;
+          }
+        } else {
+          rows.push(rosterRow({ character: name, ...fields }, { account, zone }, location));
+        }
+        continue;
+      }
+
+      const columns = text.includes("\t")
+        ? text.split("\t")
+        : plain.length > 1
+          ? plain
+          : text.split(/\s+[/／](?=\s)/);
+      if (columns.length === 1) {
+        rows.push(rosterRow({ character: columns[0], ...fields }, { account, zone }, location));
+        continue;
+      }
+      if (columns.length !== 3) throw new Error(location + "请填写账号、区服、角色三列");
+      const [rowAccount, rowZone, character] = columns;
+      rows.push(rosterRow({ account: rowAccount, zone: rowZone, character, ...fields }, { account, zone }, location));
+    }
+    return rows;
+  }
+
+  function rosterMatches(items, name) {
+    const key = normalizedName(name);
+    return items.filter((item) => normalizedName(item.name) === key);
+  }
+
+  function importRoster(serverState, rows) {
+    if (!Array.isArray(rows)) throw new Error("角色名单格式无效");
+    const server = normalizeServerState(serverState?.serverId, serverState);
+    const label = getServerDef(server.serverId).label;
+    assertServerLimits(server, label);
+    let characterCount = countServer(server).characters;
+    let addedAccounts = 0;
+    let addedZones = 0;
+    let addedCharacters = 0;
+    let updatedCharacters = 0;
+    let skippedCharacters = 0;
+    for (const [index, value] of rows.entries()) {
+      const location = "第 " + (index + 1) + " 条：";
+      const row = rosterRow(value || {}, { account: "", zone: DEFAULT_ZONE_NAME }, location);
+      const accounts = rosterMatches(server.accounts, row.account);
+      if (accounts.length > 1) throw new Error(location + "有多个同名账号「" + row.account + "」，请先区分名称");
+      let [account] = accounts;
+      if (!account) {
+        if (server.accounts.length >= ACCOUNT_LIMIT) {
+          throw new Error(location + label + "账号超过 " + ACCOUNT_LIMIT + " 个");
+        }
+        account = createAccount(row.account);
+        account.zones[0].name = row.zone;
+        server.accounts.push(account);
+        addedAccounts += 1;
+        addedZones += 1;
+      }
+
+      const zones = rosterMatches(account.zones, row.zone);
+      if (zones.length > 1) {
+        throw new Error(location + "账号「" + account.name + "」有多个同名区服「" + row.zone + "」，请先区分名称");
+      }
+      let [zone] = zones;
+      if (!zone) {
+        zone = createZone(row.zone);
+        account.zones.push(zone);
+        addedZones += 1;
+      }
+
+      const characters = rosterMatches(zone.characters, row.character);
+      const profile = normalizeCharacterProfile(row);
+      if (characters.length) {
+        const changes = characters.some((character) =>
+          Object.entries(profile).some(([field, value]) => character[field] !== value)
+        );
+        if (!changes) {
+          skippedCharacters += 1;
+          continue;
+        }
+        if (characters.length > 1) {
+          throw new Error(location + "区服「" + zone.name + "」有多个同名角色「" + row.character + "」，无法更新资料");
+        }
+        Object.assign(characters[0], profile);
+        updatedCharacters += 1;
+        continue;
+      }
+
+      if (characterCount >= CHARACTER_LIMIT) {
+        throw new Error(location + label + "角色超过 " + CHARACTER_LIMIT + " 个");
+      }
+      const character = createCharacter(row.character, server.activeRaids, server.maxAttempts);
+      zone.characters.push(Object.assign(character, profile));
+      characterCount += 1;
+      addedCharacters += 1;
+    }
+    return { server, addedAccounts, addedZones, addedCharacters, updatedCharacters, skippedCharacters };
+  }
+
+  function raidCountRow(fields, defaults, location) {
+    const { account, zone, character } = rosterRow({
+      account: fields.account,
+      zone: fields.zone,
+      character: fields.character,
+    }, defaults, location);
+    const raid = validateRosterName(readRosterName(fields.raid, ""), "团本名称", location);
+    const reading = readRosterName(fields.reading, "");
+    const value = reading.normalize("NFKC").match(/^(\d+)\s*\/\s*(\d+)$/);
+    if (!value) throw new Error(location + "团本次数请填写成 3/5 这样的格式");
+    const numerator = Number(value[1]);
+    const denominator = Number(value[2]);
+    if (!Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator) ||
+        denominator < 1 || numerator > denominator) {
+      throw new Error(location + "次数必须是 0 到上限之间的整数，上限至少为 1");
+    }
+    return { account, zone, character, raid, reading, numerator, denominator };
+  }
+
+  function collectRaidCountRow(entries, row, location) {
+    const key = JSON.stringify([
+      normalizedName(row.account), normalizedName(row.zone), normalizedName(row.character), raidNameKey(row.raid),
+    ]);
+    const previous = entries.get(key);
+    if (previous) {
+      if (previous.numerator !== row.numerator || previous.denominator !== row.denominator) {
+        const identity = [row.account, row.zone, row.character, row.raid].join(" / ");
+        throw new Error(location + "「" + identity + "」的次数冲突：" + previous.reading + " 与 " + row.reading);
+      }
+      return;
+    }
+    entries.set(key, row);
+  }
+
+  function parseRaidCountText(raw, defaults = {}) {
+    const target = {
+      account: readRosterName(defaults?.account, ""),
+      zone: readRosterName(defaults?.zone, DEFAULT_ZONE_NAME),
+    };
+    const entries = new Map();
+    const lines = String(raw ?? "").split(/\r\n|\n|\r/);
+    for (const [index, line] of lines.entries()) {
+      if (!line.trim()) continue;
+      const location = "第 " + (index + 1) + " 行：";
+      const columns = /[|｜]/.test(line) ? line.split(/[|｜]/) : line.split("\t");
+      let fields;
+      if (columns.length === 3) {
+        const [character, raid, reading] = columns;
+        fields = { character, raid, reading };
+      } else if (columns.length === 5) {
+        const [account, zone, character, raid, reading] = columns;
+        fields = { account, zone, character, raid, reading };
+      } else {
+        throw new Error(location + "请填写角色、团本、次数三列，或加上账号和区服共五列");
+      }
+      collectRaidCountRow(entries, raidCountRow(fields, target, location), location);
+    }
+    return Array.from(entries.values());
+  }
+
+  function exactRosterEntry(items, name, label, location) {
+    const matches = rosterMatches(items, name);
+    if (matches.length > 1) throw new Error(location + "有多个同名" + label + "「" + name + "」，请先区分名称");
+    if (!matches.length) throw new Error(location + "找不到" + label + "「" + name + "」");
+    return matches[0];
+  }
+
+  function importRaidCounts(serverState, rows, basis) {
+    if (basis !== "remaining" && basis !== "used") throw new Error("请先选择 X/Y 中的 X 是剩余次数还是已用次数");
+    if (!Array.isArray(rows)) throw new Error("团本次数名单格式无效");
+
+    const entries = new Map();
+    const defaults = { account: "", zone: DEFAULT_ZONE_NAME };
+    for (const [index, fields] of rows.entries()) {
+      const location = "第 " + (index + 1) + " 条：";
+      collectRaidCountRow(entries, raidCountRow(fields || {}, defaults, location), location);
+    }
+
+    const server = normalizeServerState(serverState?.serverId, serverState);
+    const pair = getRaidMode(server) === "pair";
+    const active = new Set(server.activeRaids);
+    const enabledRaids = [];
+    let updatedRaids = 0;
+    for (const row of entries.values()) {
+      const location = "「" + [row.account, row.zone, row.character, row.raid].join(" / ") + "」：";
+      const account = exactRosterEntry(server.accounts, row.account, "账号", location);
+      const zone = exactRosterEntry(account.zones, row.zone, "区服", location);
+      const character = exactRosterEntry(zone.characters, row.character, "角色", location);
+      let option = findRaid(server.raidCatalog, row.raid);
+      if (pair && (!option || !active.has(option.name))) {
+        throw new Error(location + (option ? "请先选为轮换团本" : "请先加入目录并选为轮换团本") + "，或切换到多选模式");
+      }
+      if (!option) {
+        option = { name: row.raid, detail: "" };
+        server.raidCatalog.push(option);
+      }
+      if (!active.has(option.name)) {
+        active.add(option.name);
+        enabledRaids.push(option.name);
+      }
+
+      const remaining = basis === "remaining" ? row.numerator : row.denominator - row.numerator;
+      const entry = character.raids.find((raid) => raid.name === option.name);
+      if (!entry) {
+        character.raids.push({ name: option.name, remaining, maxAttempts: row.denominator, doneToday: false });
+      } else {
+        if (entry.remaining === remaining && entry.maxAttempts === row.denominator) continue;
+        Object.assign(entry, { remaining, maxAttempts: row.denominator });
+      }
+      updatedRaids += 1;
+    }
+
+    server.activeRaids = Array.from(active);
+    return { server: normalizeServerState(server.serverId, server), updatedRaids, enabledRaids };
+  }
+
   function findMatch(items, incoming) {
     return items.find((item) => item.id === incoming.id) ||
       items.find((item) => normalizedName(item.name) === normalizedName(incoming.name));
@@ -764,6 +1085,12 @@
     removeRaid: removeRaid,
     createId: createId,
     createCharacter: createCharacter,
+    normalizeCharacterProfile: normalizeCharacterProfile,
+    parseRosterText: parseRosterText,
+    importRoster: importRoster,
+    parseRaidCountText: parseRaidCountText,
+    importRaidCounts: importRaidCounts,
+    raidLimit: raidLimit,
     createAccount: createAccount,
     createZone: createZone,
     createServerState: createServerState,
