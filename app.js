@@ -11,7 +11,7 @@ const compactLayout = window.matchMedia("(max-width: 760px)");
 
 let storageNotice = "保存在此浏览器";
 let state = readState();
-let activeTool = "raids";
+const toolByServer = { regular: "raids", season: "raids" };
 let activeFilter = "all";
 let settingsExpanded = !compactLayout.matches;
 let pendingAction = null;
@@ -74,6 +74,10 @@ function editRecord(edit, message) {
   const saved = saveState();
   render();
   if (message) showToast(saved ? message : message + "，请导出备份");
+}
+
+function currentTool() {
+  return toolByServer[state.activeServer];
 }
 
 function currentServer() {
@@ -167,8 +171,8 @@ function renderSettings() {
   const server = currentServer();
   const definition = Tracker.getServerDef(server.serverId);
   const pair = definition.raidMode === "pair";
-  byId("raid-settings").hidden = activeTool !== "raids";
-  byId("jump-to-settings").hidden = activeTool !== "raids";
+  byId("raid-settings").hidden = currentTool() !== "raids";
+  byId("jump-to-settings").hidden = currentTool() !== "raids";
   renderSettingsExpansion();
   byId("raid-settings-note").textContent = pair
     ? "选择本期开放的两个轮换团本。"
@@ -201,7 +205,7 @@ function renderSettings() {
 }
 
 function renderFilters() {
-  const options = activeTool === "raids"
+  const options = currentTool() === "raids"
     ? [["all", "全部"], ["stamina", "体力待刷"], ["raid", "副本待打"]]
     : [["all", "全部"], ["stamina", "体力待刷"]];
   byId("filters").hidden = !currentServer().accounts.length;
@@ -276,7 +280,7 @@ function renderAccount(account, characters, maxAttempts) {
   const avatar = make("span", "account-avatar", Array.from(account.name.trim())[0] || "账");
   avatar.setAttribute("aria-hidden", "true");
   const done = account.characters.filter((character) => character.staminaDone).length;
-  const progress = activeTool === "stamina"
+  const progress = currentTool() === "stamina"
     ? "体力 " + done + "/" + account.characters.length
     : account.characters.length + " 个角色";
   const header = make("div", "account-header",
@@ -291,7 +295,7 @@ function renderAccount(account, characters, maxAttempts) {
   if (!characters.length) {
     return make("article", "account-card", header, make("p", "account-note", "添加角色后即可记录进度。"));
   }
-  if (activeTool === "stamina") {
+  if (currentTool() === "stamina") {
     const rows = characters.map((character) => make("div", "stamina-row",
       staminaButton(account, character, character.name),
       make("div", "character-actions",
@@ -334,14 +338,15 @@ function render() {
   const focused = document.activeElement;
   document.body.dataset.server = state.activeServer;
   for (const control of document.querySelectorAll("[data-tool]")) {
-    if (control.dataset.tool === activeTool) control.setAttribute("aria-current", "page");
-    else control.removeAttribute("aria-current");
+    control.setAttribute("aria-pressed", String(control.dataset.tool === currentTool()));
   }
   for (const control of document.querySelectorAll("[data-select-server]")) {
     control.setAttribute("aria-pressed", String(control.dataset.selectServer === state.activeServer));
   }
-  byId("workspace-title").textContent = activeTool === "raids" ? "副本次数" : "每日体力";
-  byId("workspace-subtitle").textContent = activeTool === "raids"
+  const serverLabel = Tracker.getServerDef(state.activeServer).label;
+  byId("workspace-title").textContent = serverLabel;
+  byId("tool-nav").setAttribute("aria-label", serverLabel + "记录工具");
+  byId("workspace-subtitle").textContent = currentTool() === "raids"
     ? "北京时间 06:00 重置今日标记"
     : "北京时间 06:00 重置体力完成标记";
   renderStorageStatus();
@@ -431,7 +436,7 @@ for (const control of document.querySelectorAll("[data-select-server]")) {
 for (const control of document.querySelectorAll("[data-tool]")) {
   control.addEventListener("click", () => {
     resetAtBoundary();
-    activeTool = control.dataset.tool;
+    toolByServer[state.activeServer] = control.dataset.tool;
     activeFilter = "all";
     render();
   });
