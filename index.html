@@ -2,17 +2,17 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#14141b">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#F3F5F7">
   <meta name="description" content="记录晶核常规服和赛季服的副本次数与每日体力。">
   <title>晶核助手</title>
-  <link rel="stylesheet" href="./styles.css?v=198810ae01f4">
-  <script src="./tracker.js" defer></script>
-  <script src="./app.js?v=23568436575a" defer></script>
+  <link rel="stylesheet" href="./styles.css?v=2ee891b3e52c">
+  <script src="./tracker.js?v=ecd5bcd0293b" defer></script>
+  <script src="./app.js?v=a844b06e43a2" defer></script>
 </head>
 <body data-server="regular">
   <div class="app-shell">
-    <header class="sidebar">
+    <header class="topbar">
       <div class="topbar-inner">
         <div class="brand">
           <span class="brand-mark" aria-hidden="true"></span>
@@ -20,32 +20,32 @@
         </div>
         <nav class="server-switch" id="server-nav" aria-label="服务器">
           <button class="server-option" type="button" data-select-server="regular" aria-pressed="true">
-            <span class="server-indicator" aria-hidden="true"></span>
             <span class="server-option-text"><strong>常规服</strong><small id="regular-summary"></small></span>
           </button>
           <button class="server-option" type="button" data-select-server="season" aria-pressed="false">
-            <span class="server-indicator" aria-hidden="true"></span>
             <span class="server-option-text"><strong>赛季服</strong><small id="season-summary"></small></span>
           </button>
         </nav>
-        <div class="sidebar-footer">
-          <button class="nav-button" type="button" id="open-backup">
-            <span class="nav-icon" aria-hidden="true">⇄</span>数据备份
-          </button>
+        <div class="more-wrap">
+          <button class="nav-button" type="button" id="open-more" aria-expanded="false" aria-controls="more-menu" aria-haspopup="true">更多</button>
+          <div class="menu" id="more-menu" hidden role="menu">
+            <button class="menu-item" type="button" id="open-backup" role="menuitem">数据备份</button>
+            <button class="menu-item" type="button" id="jump-to-settings" role="menuitem">打开设置</button>
+          </div>
         </div>
       </div>
     </header>
 
     <main class="workspace">
-      <div class="hero">
-        <header class="workspace-header">
+      <section class="today-strip" aria-labelledby="workspace-title">
+        <header class="today-header">
           <div>
             <h1 id="workspace-title">常规服</h1>
-            <p class="workspace-subtitle" id="workspace-subtitle">北京时间 06:00 重置今日标记</p>
+            <p class="today-subtitle" id="workspace-subtitle">北京时间 06:00 重置今日标记，剩余次数不会自动恢复</p>
+            <p class="roster-meta" id="roster-meta"></p>
           </div>
           <span class="save-status" id="storage-status" role="status">正在读取浏览器数据</span>
         </header>
-
         <nav class="tool-nav" id="tool-nav" aria-label="常规服记录工具">
           <button class="tool-button" type="button" data-tool="raids" aria-pressed="true">
             <span class="nav-icon nav-icon--raid" aria-hidden="true">◈</span>副本次数
@@ -54,39 +54,44 @@
             <span class="nav-icon nav-icon--stamina" aria-hidden="true">✓</span>每日体力
           </button>
         </nav>
-
-        <section class="metrics-grid" id="metrics" aria-label="当前进度"></section>
-      </div>
+        <div class="metrics-grid" id="metrics" aria-label="今日概况"></div>
+      </section>
 
       <div class="work-grid">
         <section class="accounts-region" aria-labelledby="accounts-title">
           <div class="section-heading">
-            <div class="section-title"><h2 id="accounts-title">账号与角色</h2></div>
+            <div class="section-title"><h2 id="accounts-title" tabindex="-1">账号与角色</h2></div>
             <div class="action-group">
-              <button class="button button--secondary" type="button" id="reset-daily">重置今日进度</button>
               <button class="button button--primary" type="button" id="add-account">+ 添加账号</button>
             </div>
           </div>
           <div class="work-toolbar">
             <div class="filter-bar" id="filters" aria-label="筛选角色"></div>
-            <a class="mobile-settings-link" id="jump-to-settings" href="#raid-settings">副本设置 <span aria-hidden="true">↘</span></a>
           </div>
           <div class="account-list" id="account-list"></div>
         </section>
+
         <section class="panel" id="raid-settings" aria-labelledby="raid-settings-title">
           <div class="section-heading">
             <div class="section-title">
-              <h2 id="raid-settings-title">副本设置</h2>
+              <h2 id="raid-settings-title">设置</h2>
               <p id="raid-settings-note">选择需要记录的副本。</p>
             </div>
-            <div class="action-group">
-              <button class="button button--secondary" type="button" id="restore-raids">恢复副本次数</button>
-              <button class="button button--quiet" type="button" id="toggle-raid-settings" aria-expanded="true" aria-controls="raid-settings-content">收起设置</button>
-            </div>
+            <button class="button button--quiet" type="button" id="toggle-raid-settings" aria-expanded="true" aria-controls="raid-settings-content">收起设置</button>
           </div>
           <div id="raid-settings-content">
             <div class="settings-body">
               <div class="raid-controls" id="raid-controls"></div>
+              <div class="raid-catalog-toolbar">
+                <label class="raid-mode-field" for="raid-mode">
+                  <span>启用方式</span>
+                  <select id="raid-mode">
+                    <option value="multi">多选副本</option>
+                    <option value="pair">双副本轮换</option>
+                  </select>
+                </label>
+                <button class="button button--secondary" type="button" id="open-raid-catalog" aria-haspopup="dialog" aria-controls="raid-catalog-dialog">管理副本</button>
+              </div>
               <div class="attempt-control">
                 <span>每副本次数上限</span>
                 <div class="attempt-stepper" aria-label="每副本次数上限">
@@ -97,6 +102,10 @@
               </div>
             </div>
             <div class="raid-overview" id="raid-overview" aria-label="各副本剩余次数"></div>
+          </div>
+          <div class="settings-actions">
+            <button class="button button--secondary" type="button" id="restore-raids">恢复副本次数</button>
+            <button class="button button--secondary" type="button" id="reset-daily">重置今日进度</button>
           </div>
         </section>
       </div>
@@ -111,6 +120,10 @@
       <label class="dialog-field" id="name-field" hidden>
         <span id="name-label"></span>
         <input type="text" id="name-input" maxlength="40" autocomplete="off">
+      </label>
+      <label class="dialog-field" id="choice-field" hidden>
+        <span id="choice-label"></span>
+        <select id="action-choice"></select>
       </label>
       <div class="dialog-actions">
         <button class="button button--secondary" type="button" id="cancel-action">取消</button>
@@ -146,6 +159,46 @@
     </div>
   </dialog>
 
-  <div class="toast" id="toast" role="status" hidden></div>
+  <dialog class="dialog" id="raid-catalog-dialog" aria-labelledby="raid-catalog-title" aria-describedby="raid-catalog-note">
+    <div class="dialog-header"><h2 id="raid-catalog-title">管理副本</h2></div>
+    <p class="dialog-message" id="raid-catalog-note">新增副本后，可在设置中启用。改名会保留已有次数。</p>
+    <form id="add-catalog-raid" class="catalog-form">
+      <label class="dialog-field" for="catalog-raid-name">
+        <span>副本名称</span>
+        <input type="text" id="catalog-raid-name" maxlength="40" autocomplete="off" required>
+      </label>
+      <button class="button button--primary" type="submit">添加副本</button>
+    </form>
+    <p class="dialog-message" id="catalog-message" role="status" hidden></p>
+    <div class="catalog-list" id="raid-catalog-list"></div>
+    <div class="dialog-actions">
+      <button class="button button--secondary" type="button" id="close-raid-catalog">关闭</button>
+    </div>
+  </dialog>
+
+  <dialog class="dialog" id="batch-dialog" aria-labelledby="batch-title">
+    <form id="batch-form">
+      <div class="dialog-header"><h2 id="batch-title">批量记录</h2></div>
+      <p class="dialog-message" id="batch-account"></p>
+      <label class="dialog-field">
+        <span>记录项目</span>
+        <select id="batch-kind"></select>
+      </label>
+      <div class="batch-toolbar">
+        <button class="button button--secondary" type="button" id="batch-select-all">全选</button>
+        <span id="batch-selection" role="status">已选 0 个角色</span>
+      </div>
+      <div class="batch-list" id="batch-options"></div>
+      <div class="dialog-actions">
+        <button class="button button--secondary" type="button" id="close-batch">取消</button>
+        <button class="button button--primary" type="submit" id="batch-confirm" disabled>完成 0 个角色</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" hidden>
+    <span id="toast-message" role="status"></span>
+    <button class="toast-undo" type="button" id="undo-record" hidden>撤销</button>
+  </div>
 </body>
 </html>

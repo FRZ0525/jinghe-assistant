@@ -12,6 +12,8 @@
   const ACCOUNT_LIMIT = 100;
   const CHARACTER_LIMIT = 1000;
   const BACKUP_LIMIT = 4000000;
+  const DEFAULT_ZONE_NAME = "默认区";
+  const LEGACY_ZONE_ID = "zone-default";
   const SHANGHAI_CLOCK = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
     year: "numeric",
@@ -73,14 +75,51 @@
     );
   }
 
-  function clone(value) {
-    return JSON.parse(JSON.stringify(value));
+  function raidNameKey(name) {
+    return typeof name === "string" ? name.trim().toLowerCase() : "";
   }
 
-  function catalogNames(def) {
-    return def.raids.map(function raidName(raid) {
-      return raid.name;
-    });
+  function getRaidMode(server) {
+    if (server?.raidMode === "pair" || server?.raidMode === "multi") return server.raidMode;
+    return getServerDef(server?.serverId).raidMode;
+  }
+
+  function minimumRaidCount(mode) {
+    return mode === "pair" ? 2 : 1;
+  }
+
+  function normalizeRaidCatalog(def, value, mode) {
+    const entries = Array.isArray(value) ? value : def.raids;
+    const seen = new Set();
+    const catalog = [];
+    for (const entry of entries) {
+      const key = raidNameKey(entry?.name);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      catalog.push({
+        name: entry.name.trim(),
+        detail: typeof entry.detail === "string" ? entry.detail : "",
+      });
+    }
+
+    // Repair incomplete catalogs in imported or manually edited data.
+    for (const template of def.raids) {
+      if (catalog.length >= minimumRaidCount(mode)) break;
+      const key = raidNameKey(template.name);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      catalog.push({ ...template });
+    }
+    return catalog;
+  }
+
+  function getRaidCatalog(server) {
+    return normalizeRaidCatalog(getServerDef(server?.serverId), server?.raidCatalog, getRaidMode(server));
+  }
+
+  function findRaid(catalog, name) {
+    const key = raidNameKey(name);
+    return catalog.find((raid) => raidNameKey(raid.name) === key);
   }
 
   function clampMax(value, fallback) {
@@ -96,34 +135,21 @@
     return Math.min(max, Math.max(0, number));
   }
 
-  function normalizeActiveRaids(def, value) {
-    const names = catalogNames(def);
-    const source = Array.isArray(value) ? value : [];
-    const picked = [];
-    source.forEach(function pick(name) {
-      if (names.includes(name) && !picked.includes(name)) picked.push(name);
-    });
-
-    if (def.raidMode === "pair") {
-      const first = picked[0] || def.defaultActive[0];
-      let second = picked[1] || def.defaultActive[1];
-      if (second === first) {
-        second =
-          names.find(function different(name) {
-            return name !== first;
-          }) || first;
-      }
-      return [first, second];
+  function normalizeActiveRaids(def, catalog, value, mode) {
+    const byName = new Map(catalog.map((raid) => [raidNameKey(raid.name), raid.name]));
+    const saved = Array.isArray(value) ? value : [];
+    const picked = new Set(saved.map((name) => byName.get(raidNameKey(name))).filter(Boolean));
+    const defaults = def.defaultActive.map((name) => byName.get(raidNameKey(name)));
+    if (mode === "pair") {
+      const [first, second] = picked;
+      const firstRaid = first || defaults[0] || catalog[0].name;
+      const secondRaid = second || [defaults[1], ...byName.values()].find((name) => name && name !== firstRaid);
+      return [firstRaid, secondRaid];
     }
 
-    if (!picked.length) {
-      return def.defaultActive.filter(function known(name) {
-        return names.includes(name);
-      });
-    }
-    return names.filter(function selected(name) {
-      return picked.includes(name);
-    });
+    if (picked.size) return catalog.filter((raid) => picked.has(raid.name)).map((raid) => raid.name);
+    const availableDefaults = defaults.filter(Boolean);
+    return availableDefaults.length ? availableDefaults : [catalog[0].name];
   }
 
   function createCharacter(name, activeRaids, maxAttempts) {
@@ -143,28 +169,56 @@
     };
   }
 
+  function createZone(name) {
+    return { id: createId("zone"), name: name || DEFAULT_ZONE_NAME, characters: [] };
+  }
+
   function createAccount(name) {
     return {
       id: createId("account"),
       name: name || "新账号",
-      characters: [],
+      zones: [createZone(DEFAULT_ZONE_NAME)],
     };
   }
 
-  function normalizeCharacter(value, index, activeRaids, maxAttempts) {
-    const source = value && typeof value === "object" ? value : {};
+  function normalizeSiblings(value, prefix, normalize) {
+    const entries = Array.isArray(value)
+      ? value.map((entry) => entry && typeof entry === "object" ? entry : {})
+      : [];
+    const originalIds = entries.map((entry) => typeof entry.id === "string" && entry.id.trim() ? entry.id : "");
+    const reserved = new Set(originalIds);
+    const used = new Set();
+    return entries.map((entry, index) => {
+      let id = originalIds[index];
+      if (!id || used.has(id)) {
+        const generated = createId(prefix);
+        id = generated;
+        for (let suffix = 2; reserved.has(id) || used.has(id); suffix += 1) {
+          id = generated + "-" + suffix;
+        }
+      }
+      used.add(id);
+      return normalize(entry, id, index);
+    });
+  }
+
+  function normalizeName(value, fallback) {
+    return typeof value === "string" && value.trim() ? value.trim() : fallback;
+  }
+
+  function normalizeCharacter(source, id, index, activeRaids, maxAttempts) {
     const sourceRaids = Array.isArray(source.raids) ? source.raids : [];
+    const byName = new Map();
+    for (const raid of sourceRaids) {
+      const key = raidNameKey(raid?.name);
+      if (key && !byName.has(key)) byName.set(key, raid);
+    }
     return {
-      id: typeof source.id === "string" && source.id ? source.id : createId("character"),
-      name:
-        typeof source.name === "string" && source.name.trim()
-          ? source.name.trim()
-          : "角色" + (index + 1),
+      id,
+      name: normalizeName(source.name, "角色" + (index + 1)),
       staminaDone: source.staminaDone === true,
       raids: activeRaids.map(function normalizeRaid(raidName) {
-        const existing = sourceRaids.find(function matchRaid(raid) {
-          return raid && raid.name === raidName;
-        });
+        const existing = byName.get(raidNameKey(raidName));
         return {
           name: raidName,
           remaining: existing
@@ -180,34 +234,29 @@
     const def = getServerDef(serverId);
     const source = value && typeof value === "object" ? value : {};
     const maxAttempts = clampMax(source.maxAttempts, def.defaultMaxAttempts);
-    const activeRaids = normalizeActiveRaids(def, source.activeRaids);
-    const sourceAccounts = Array.isArray(source.accounts) ? source.accounts : [];
+    const raidMode = getRaidMode({ serverId: def.id, raidMode: source.raidMode });
+    const raidCatalog = normalizeRaidCatalog(def, source.raidCatalog, raidMode);
+    const activeRaids = normalizeActiveRaids(def, raidCatalog, source.activeRaids, raidMode);
     return {
       serverId: def.id,
-      maxAttempts: maxAttempts,
-      activeRaids: activeRaids,
-      accounts: sourceAccounts.map(function normalizeAccount(account, accountIndex) {
-        const accountSource = account && typeof account === "object" ? account : {};
-        const characters = Array.isArray(accountSource.characters)
-          ? accountSource.characters
-          : [];
+      maxAttempts,
+      raidMode,
+      raidCatalog,
+      activeRaids,
+      accounts: normalizeSiblings(source.accounts, "account", (account, id, accountIndex) => {
+        const sourceZones = Array.isArray(account.zones)
+          ? account.zones
+          : [{ id: LEGACY_ZONE_ID, name: DEFAULT_ZONE_NAME, characters: account.characters }];
         return {
-          id:
-            typeof accountSource.id === "string" && accountSource.id
-              ? accountSource.id
-              : createId("account"),
-          name:
-            typeof accountSource.name === "string" && accountSource.name.trim()
-              ? accountSource.name.trim()
-              : "账号" + (accountIndex + 1),
-          characters: characters.map(function mapCharacter(character, characterIndex) {
-            return normalizeCharacter(
-              character,
-              characterIndex,
-              activeRaids,
-              maxAttempts,
-            );
-          }),
+          id,
+          name: normalizeName(account.name, "账号" + (accountIndex + 1)),
+          zones: normalizeSiblings(sourceZones, "zone", (zone, zoneId, zoneIndex) => ({
+            id: zoneId,
+            name: normalizeName(zone.name, "区服" + (zoneIndex + 1)),
+            characters: normalizeSiblings(zone.characters, "character", (character, characterId, index) =>
+              normalizeCharacter(character, characterId, index, activeRaids, maxAttempts)
+            ),
+          })),
         };
       }),
     };
@@ -256,23 +305,21 @@
     };
   }
 
+  function serverZones(server) {
+    return server.accounts.flatMap((account) => account.zones);
+  }
+
   function summarize(serverState) {
     const server = normalizeServerState(serverState && serverState.serverId, serverState);
-    const def = getServerDef(server.serverId);
-    const totals = {};
-    server.activeRaids.forEach(function initRaid(name) {
-      const raid = def.raids.find(function match(item) {
-        return item.name === name;
-      });
-      totals[name] = {
-        name: name,
-        detail: raid ? raid.detail : "",
-        characters: 0,
-        remaining: 0,
-        doneToday: 0,
-        requiredToday: 0,
-      };
-    });
+    const details = new Map(server.raidCatalog.map((raid) => [raid.name, raid.detail]));
+    const totals = new Map(server.activeRaids.map((name) => [name, {
+      name,
+      detail: details.get(name) || "",
+      characters: 0,
+      remaining: 0,
+      doneToday: 0,
+      requiredToday: 0,
+    }]));
 
     let characterCount = 0;
     let staminaDone = 0;
@@ -280,12 +327,13 @@
     let raidsRequiredToday = 0;
     let raidsPending = 0;
 
-    server.accounts.forEach(function walkAccount(account) {
-      account.characters.forEach(function walkCharacter(character) {
+    const zones = serverZones(server);
+    zones.forEach(function walkZone(zone) {
+      zone.characters.forEach(function walkCharacter(character) {
         characterCount += 1;
         if (character.staminaDone) staminaDone += 1;
         character.raids.forEach(function walkRaid(raid) {
-          const bucket = totals[raid.name];
+          const bucket = totals.get(raid.name);
           if (!bucket) return;
           bucket.characters += 1;
           bucket.remaining += raid.remaining;
@@ -305,6 +353,7 @@
     return {
       serverId: server.serverId,
       accountCount: server.accounts.length,
+      zoneCount: zones.length,
       characterCount: characterCount,
       staminaDone: staminaDone,
       staminaPending: characterCount - staminaDone,
@@ -312,15 +361,15 @@
       raidsRequiredToday: raidsRequiredToday,
       raidsPending: raidsPending,
       raids: server.activeRaids.map(function raidSummary(name) {
-        return totals[name];
+        return totals.get(name);
       }),
     };
   }
 
   function resetDailyProgress(serverState) {
     const server = normalizeServerState(serverState && serverState.serverId, serverState);
-    server.accounts.forEach(function resetAccount(account) {
-      account.characters.forEach(function resetCharacter(character) {
+    serverZones(server).forEach(function resetZone(zone) {
+      zone.characters.forEach(function resetCharacter(character) {
         character.staminaDone = false;
         character.raids.forEach(function resetRaid(raid) {
           raid.doneToday = false;
@@ -332,8 +381,8 @@
 
   function resetRaidCycle(serverState) {
     const server = normalizeServerState(serverState && serverState.serverId, serverState);
-    server.accounts.forEach(function resetAccount(account) {
-      account.characters.forEach(function resetCharacter(character) {
+    serverZones(server).forEach(function resetZone(zone) {
+      zone.characters.forEach(function resetCharacter(character) {
         character.raids.forEach(function resetRaid(raid) {
           raid.remaining = server.maxAttempts;
           raid.doneToday = false;
@@ -343,56 +392,102 @@
     return server;
   }
 
+  function setRaidMode(serverState, mode) {
+    const server = normalizeServerState(serverState?.serverId, serverState);
+    if (mode !== "pair" && mode !== "multi") return unchangedRaid(server, "请选择有效的启用方式");
+    if (server.raidMode === mode) return unchangedRaid(server, "启用方式没有变化");
+    if (server.raidCatalog.length < minimumRaidCount(mode)) {
+      return unchangedRaid(server, "双副本轮换需要至少两个候选副本");
+    }
+    server.raidMode = mode;
+    return { changed: true, server: normalizeServerState(server.serverId, server), message: "" };
+  }
+
   function setMaxAttempts(serverState, maxAttempts) {
-    return normalizeServerState(serverState && serverState.serverId, {
-      serverId: serverState && serverState.serverId,
-      maxAttempts: maxAttempts,
-      activeRaids: serverState && serverState.activeRaids,
-      accounts: serverState && serverState.accounts,
-    });
+    return normalizeServerState(serverState?.serverId, { ...serverState, maxAttempts });
   }
 
   function moveActiveRaid(serverState, slotIndex, nextName) {
-    const server = normalizeServerState(serverState && serverState.serverId, serverState);
-    const def = getServerDef(server.serverId);
-    if (def.raidMode !== "pair") return server;
-    const names = catalogNames(def);
-    if (!names.includes(nextName)) return server;
-    const active = server.activeRaids.slice();
+    const server = normalizeServerState(serverState?.serverId, serverState);
+    if (server.raidMode !== "pair") return server;
+    const next = findRaid(server.raidCatalog, nextName);
+    if (!next) return server;
+    const active = server.activeRaids;
     const slot = slotIndex === 1 ? 1 : 0;
-    const other = slot === 0 ? 1 : 0;
-    const oldName = active[slot];
-    if (active[other] === nextName) active[other] = oldName;
-    active[slot] = nextName;
-    server.activeRaids = active;
+    const other = 1 - slot;
+    if (active[other] === next.name) active[other] = active[slot];
+    active[slot] = next.name;
     return normalizeServerState(server.serverId, server);
   }
 
   function toggleActiveRaid(serverState, name) {
-    const server = normalizeServerState(serverState && serverState.serverId, serverState);
-    const def = getServerDef(server.serverId);
-    if (def.raidMode !== "multi") {
-      return { server: server, changed: false, message: "赛季服请改两个轮换位" };
-    }
-    if (!catalogNames(def).includes(name)) {
-      return { server: server, changed: false, message: "没有这个副本" };
-    }
-    const active = server.activeRaids.slice();
-    const index = active.indexOf(name);
+    const server = normalizeServerState(serverState?.serverId, serverState);
+    if (server.raidMode !== "multi") return unchangedRaid(server, "双副本轮换请调整轮换位");
+    const raid = findRaid(server.raidCatalog, name);
+    if (!raid) return unchangedRaid(server, "没有这个副本");
+    const active = server.activeRaids;
+    const index = active.indexOf(raid.name);
     if (index >= 0) {
-      if (active.length <= 1) {
-        return { server: server, changed: false, message: "至少保留一个副本" };
-      }
+      if (active.length <= 1) return unchangedRaid(server, "至少保留一个启用的副本");
       active.splice(index, 1);
     } else {
-      active.push(name);
+      active.push(raid.name);
     }
-    server.activeRaids = active;
-    return {
-      server: normalizeServerState(server.serverId, server),
-      changed: true,
-      message: "",
-    };
+    return { changed: true, server: normalizeServerState(server.serverId, server), message: "" };
+  }
+
+  function unchangedRaid(server, message) {
+    return { changed: false, server, message };
+  }
+
+  function addRaid(serverState, name) {
+    const server = normalizeServerState(serverState?.serverId, serverState);
+    if (!raidNameKey(name)) return unchangedRaid(server, "请输入副本名称");
+    if (findRaid(server.raidCatalog, name)) return unchangedRaid(server, "已存在同名副本");
+    server.raidCatalog.push({ name: name.trim(), detail: "" });
+    return { changed: true, server, message: "" };
+  }
+
+  function renameRaid(serverState, oldName, newName) {
+    const server = normalizeServerState(serverState?.serverId, serverState);
+    const raid = findRaid(server.raidCatalog, oldName);
+    if (!raid) return unchangedRaid(server, "没有这个副本");
+    if (!raidNameKey(newName)) return unchangedRaid(server, "请输入副本名称");
+    const matching = findRaid(server.raidCatalog, newName);
+    if (matching && matching !== raid) return unchangedRaid(server, "已存在同名副本");
+    const nextName = newName.trim();
+    const previousName = raid.name;
+    if (nextName === previousName) return unchangedRaid(server, "副本名称没有变化");
+
+    raid.name = nextName;
+    server.activeRaids = server.activeRaids.map((name) => name === previousName ? nextName : name);
+    for (const zone of serverZones(server)) {
+      for (const character of zone.characters) {
+        const record = character.raids.find((entry) => entry.name === previousName);
+        if (record) record.name = nextName;
+      }
+    }
+    return { changed: true, server, message: "" };
+  }
+
+  function removeRaid(serverState, name) {
+    const server = normalizeServerState(serverState?.serverId, serverState);
+    const raid = findRaid(server.raidCatalog, name);
+    if (!raid) return unchangedRaid(server, "没有这个副本");
+    const minimum = minimumRaidCount(server.raidMode);
+    if (server.raidCatalog.length <= minimum) {
+      return unchangedRaid(server, "副本目录至少保留 " + minimum + " 项");
+    }
+
+    server.raidCatalog = server.raidCatalog.filter((entry) => entry !== raid);
+    const active = server.activeRaids.filter((entry) => entry !== raid.name);
+    if (active.length < minimum) {
+      const replacement = server.raidCatalog.find((entry) => !active.includes(entry.name));
+      server.activeRaids = server.activeRaids.map((entry) => entry === raid.name ? replacement.name : entry);
+    } else {
+      server.activeRaids = active;
+    }
+    return { changed: true, server: normalizeServerState(server.serverId, server), message: "" };
   }
 
   function shanghaiDateParts(value) {
@@ -442,19 +537,18 @@
     }
     return {
       format: "jinghe-record-backup",
-      version: 1,
+      version: 2,
       exportedAt: new Date().toISOString(),
       data: data,
     };
   }
 
   function countServer(server) {
-    const characters = server.accounts.reduce(function add(total, account) {
-      return total + account.characters.length;
-    }, 0);
+    const zones = serverZones(server);
     return {
       accounts: server.accounts.length,
-      characters: characters,
+      zones: zones.length,
+      characters: zones.reduce((total, zone) => total + zone.characters.length, 0),
     };
   }
 
@@ -470,8 +564,8 @@
 
   function emptyCounts() {
     return {
-      season: { accounts: 0, characters: 0 },
-      regular: { accounts: 0, characters: 0 },
+      season: { accounts: 0, zones: 0, characters: 0 },
+      regular: { accounts: 0, zones: 0, characters: 0 },
     };
   }
 
@@ -489,7 +583,7 @@
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("剪贴板内容不是有效的备份");
     }
-    if (parsed.format === "jinghe-record-backup" && parsed.version && parsed.version !== 1) {
+    if (parsed.format === "jinghe-record-backup" && parsed.version && ![1, 2].includes(parsed.version)) {
       throw new Error("无法识别的备份版本");
     }
 
@@ -515,6 +609,7 @@
       };
       return {
         mode: "platform",
+        version: parsed.version || 1,
         app: app,
         server: null,
         dailyDate: app.dailyDate,
@@ -522,6 +617,7 @@
         layoutMode: layoutMode,
         counts: counts,
         accountCount: counts.season.accounts + counts.regular.accounts,
+        zoneCount: counts.season.zones + counts.regular.zones,
         characterCount: counts.season.characters + counts.regular.characters,
       };
     }
@@ -544,6 +640,7 @@
     counts.season = seasonCounts;
     return {
       mode: "legacy-season",
+      version: 1,
       app: null,
       server: server,
       dailyDate: typeof source.dailyDate === "string" ? source.dailyDate : "",
@@ -551,6 +648,7 @@
       layoutMode: layoutMode,
       counts: counts,
       accountCount: seasonCounts.accounts,
+      zoneCount: seasonCounts.zones,
       characterCount: seasonCounts.characters,
     };
   }
@@ -561,80 +659,81 @@
       .toLocaleLowerCase();
   }
 
-  function mergeServerAccounts(currentServer, importedServer) {
+  function findMatch(items, incoming) {
+    return items.find((item) => item.id === incoming.id) ||
+      items.find((item) => normalizedName(item.name) === normalizedName(incoming.name));
+  }
+
+  function mergeServerAccounts(currentServer, importedServer, legacyZones) {
     const current = normalizeServerState(currentServer.serverId, currentServer);
+    const def = getServerDef(current.serverId);
+    // Imported custom options are available for selection while the local active list is preserved.
+    const builtInNames = new Set(def.raids.map((raid) => raidNameKey(raid.name)));
+    const currentNames = new Set(current.raidCatalog.map((raid) => raidNameKey(raid.name)));
+    for (const entry of getRaidCatalog(importedServer)) {
+      const key = raidNameKey(entry.name);
+      if (!currentNames.has(key) && !builtInNames.has(key)) current.raidCatalog.push(entry);
+    }
     const imported = normalizeServerState(current.serverId, {
-      serverId: current.serverId,
       maxAttempts: current.maxAttempts,
+      raidMode: current.raidMode,
+      raidCatalog: current.raidCatalog,
       activeRaids: current.activeRaids,
       accounts: importedServer.accounts,
     });
-    let addedAccounts = 0;
-    let addedCharacters = 0;
+    const added = { accounts: 0, zones: 0, characters: 0 };
 
-    imported.accounts.forEach(function mergeAccount(importedAccount) {
-      const account = current.accounts.find(function findAccount(item) {
-        return (
-          item.id === importedAccount.id ||
-          normalizedName(item.name) === normalizedName(importedAccount.name)
-        );
-      });
+    for (const incoming of imported.accounts) {
+      const account = findMatch(current.accounts, incoming);
       if (!account) {
-        current.accounts.push(clone(importedAccount));
-        addedAccounts += 1;
-        addedCharacters += importedAccount.characters.length;
-        return;
+        current.accounts.push(incoming);
+        added.accounts += 1;
+        added.zones += incoming.zones.length;
+        added.characters += incoming.zones.reduce((total, zone) => total + zone.characters.length, 0);
+        continue;
       }
-      importedAccount.characters.forEach(function mergeCharacter(importedCharacter) {
-        const exists = account.characters.some(function findCharacter(item) {
-          return (
-            item.id === importedCharacter.id ||
-            normalizedName(item.name) === normalizedName(importedCharacter.name)
-          );
-        });
-        if (!exists) {
-          account.characters.push(clone(importedCharacter));
-          addedCharacters += 1;
+
+      for (const importedZone of incoming.zones) {
+        const zone = legacyZones && importedZone.name === DEFAULT_ZONE_NAME
+          ? account.zones.find((item) => item.name === DEFAULT_ZONE_NAME)
+          : findMatch(account.zones, importedZone);
+        if (!zone) {
+          account.zones.push(importedZone);
+          added.zones += 1;
+          added.characters += importedZone.characters.length;
+          continue;
         }
-      });
-    });
+        for (const character of importedZone.characters) {
+          if (findMatch(zone.characters, character)) continue;
+          zone.characters.push(character);
+          added.characters += 1;
+        }
+      }
+    }
 
     const server = normalizeServerState(current.serverId, current);
     assertServerLimits(server, getServerDef(current.serverId).label);
-    return {
-      server: server,
-      addedAccounts: addedAccounts,
-      addedCharacters: addedCharacters,
-    };
+    return { server, added };
   }
 
   function mergeBackup(currentApp, parsed) {
     const next = normalizeAppState(currentApp);
+    const legacySeason = parsed.mode === "legacy-season";
+    const serverIds = legacySeason ? ["season"] : ["season", "regular"];
     let addedAccounts = 0;
+    let addedZones = 0;
     let addedCharacters = 0;
 
-    if (parsed.mode === "legacy-season") {
-      const merged = mergeServerAccounts(next.servers.season, parsed.server);
-      next.servers.season = merged.server;
-      addedAccounts += merged.addedAccounts;
-      addedCharacters += merged.addedCharacters;
-    } else {
-      ["season", "regular"].forEach(function mergeOne(serverId) {
-        const merged = mergeServerAccounts(
-          next.servers[serverId],
-          parsed.app.servers[serverId],
-        );
-        next.servers[serverId] = merged.server;
-        addedAccounts += merged.addedAccounts;
-        addedCharacters += merged.addedCharacters;
-      });
+    for (const serverId of serverIds) {
+      const imported = legacySeason ? parsed.server : parsed.app.servers[serverId];
+      const merged = mergeServerAccounts(next.servers[serverId], imported, legacySeason || parsed.version === 1);
+      next.servers[serverId] = merged.server;
+      addedAccounts += merged.added.accounts;
+      addedZones += merged.added.zones;
+      addedCharacters += merged.added.characters;
     }
 
-    return {
-      app: normalizeAppState(next),
-      addedAccounts: addedAccounts,
-      addedCharacters: addedCharacters,
-    };
+    return { app: next, addedAccounts, addedZones, addedCharacters };
   }
 
   function replaceBackup(currentApp, parsed) {
@@ -655,10 +754,18 @@
     ACCOUNT_LIMIT: ACCOUNT_LIMIT,
     CHARACTER_LIMIT: CHARACTER_LIMIT,
     BACKUP_LIMIT: BACKUP_LIMIT,
+    DEFAULT_ZONE_NAME: DEFAULT_ZONE_NAME,
     getServerDef: getServerDef,
+    getRaidMode: getRaidMode,
+    getRaidCatalog: getRaidCatalog,
+    setRaidMode: setRaidMode,
+    addRaid: addRaid,
+    renameRaid: renameRaid,
+    removeRaid: removeRaid,
     createId: createId,
     createCharacter: createCharacter,
     createAccount: createAccount,
+    createZone: createZone,
     createServerState: createServerState,
     createAppState: createAppState,
     normalizeServerState: normalizeServerState,
