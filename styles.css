@@ -533,52 +533,96 @@ body[data-server="season"] .hero {
 .account-list { border-top: 1px solid var(--line); }
 .account-card {
   min-width: 0;
-  padding: 2px 1px 10px;
+  padding: 6px 0 10px;
   border-bottom: 1px solid var(--line);
 }
 
 .account-header {
   justify-content: flex-start;
   gap: 10px;
-  padding: 12px 0 9px;
-}
-
-.account-avatar {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
-  overflow: hidden;
-  place-items: center;
-  border: 1px solid var(--accent-edge);
+  padding: 7px 10px;
+  border-inline-start: 2px solid var(--accent-edge);
   border-radius: 6px;
   background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 13px;
-  font-weight: 730;
 }
 
-.account-heading { min-width: 0; }
-.account-heading strong, .account-heading small { display: block; }
-.account-heading strong { font-size: 16px; font-weight: 720; overflow-wrap: anywhere; }
-.account-heading small { color: var(--muted); font-size: 12px; }
+.account-heading {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.account-name-line, .character-identity {
+  display: inline-grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 7px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.entry-kind {
+  display: inline-block;
+  padding: 1px 5px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 640;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.entry-kind--account {
+  border-color: var(--accent-edge);
+  color: var(--accent);
+}
+
+.entry-kind--character {
+  border-color: #405e54;
+  color: var(--teal);
+}
+
+.account-name {
+  min-width: 0;
+  font-size: 17px;
+  font-weight: 760;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.account-heading small {
+  display: block;
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .account-actions { margin-inline-start: auto; }
 
 .character-list, .stamina-list {
   display: grid;
   gap: 4px;
   min-width: 0;
-  margin-inline-start: 43px;
+  margin: 5px 0 0 10px;
+  padding-inline-start: 13px;
+  border-inline-start: 1px solid var(--line-strong);
 }
 
 .character-card {
   min-width: 0;
-  padding: 7px 0 10px;
-  border-top: 1px solid #302822;
+  padding: 6px 0 9px;
+  border-top: 1px solid var(--line);
 }
 
+.character-card:first-child { border-top: 0; }
 .character-header { gap: 6px; }
-.character-header strong { min-width: 0; overflow-wrap: anywhere; }
+
+.character-name {
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 680;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
 
 .raid-list, .stamina-list {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 184px), 1fr));
@@ -962,12 +1006,13 @@ body[data-server="season"] .hero {
   .filter-bar { gap: 2px; }
   .filter-button { font-size: 12px; padding-inline: 6px; }
 
-  .account-header { flex-wrap: wrap; gap: 7px; }
-  .account-heading { flex: 1 1 75%; }
-  .account-actions { margin: 0; justify-content: flex-start; }
-  .character-list, .stamina-list { margin-inline-start: 0; }
+  .account-header { flex-wrap: wrap; gap: 3px 7px; padding: 6px 8px; }
+  .account-heading { flex: 1 1 120px; }
+  .account-actions { margin-inline-start: 0; justify-content: flex-start; }
+  .character-list, .stamina-list { margin-inline-start: 5px; padding-inline-start: 7px; }
   .character-header { align-items: flex-start; flex-wrap: wrap; }
   .character-actions { justify-content: flex-start; }
+  .character-name { font-size: 13px; }
   .raid-list, .stamina-list { grid-template-columns: repeat(auto-fit, minmax(min(100%, 133px), 1fr)); }
   .raid-toggle, .stamina-toggle { font-size: 12px; }
 
@@ -979,7 +1024,6 @@ body[data-server="season"] .hero {
 
 @media (max-width: 354px) {
   .hero { padding-inline: 10px; }
-  .account-heading { flex-basis: 70%; }
 }
 
 @media (pointer: coarse) {

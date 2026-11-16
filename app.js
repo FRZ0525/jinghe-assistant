@@ -219,7 +219,10 @@ function renderFilters() {
 function accountButton(label, action, account, character) {
   const data = { action, account: account.id };
   if (character) data.character = character.id;
-  return button(label, "button button--quiet", data);
+  const control = button(label, "button button--quiet", data);
+  const target = character ? "角色「" + character.name + "」" : "账号「" + account.name + "」";
+  control.setAttribute("aria-label", target + " " + label.replace(/^[＋+]\s*/, ""));
+  return control;
 }
 
 function taskButton(label, className, data, done) {
@@ -231,12 +234,19 @@ function taskButton(label, className, data, done) {
   return control;
 }
 
-function staminaButton(account, character, displayName) {
-  const control = taskButton(displayName, "stamina-toggle", {
+function staminaButton(account, character, content) {
+  const control = taskButton(content, "stamina-toggle", {
     action: "stamina", account: account.id, character: character.id,
   }, character.staminaDone);
-  control.setAttribute("aria-label", character.name + " 体力已刷");
+  control.setAttribute("aria-label", "角色「" + character.name + "」体力已刷");
   return control;
+}
+
+function characterIdentity(character) {
+  return make("span", "character-identity",
+    make("span", "entry-kind entry-kind--character", "角色"),
+    make("strong", "character-name", character.name)
+  );
 }
 
 function isPendingRaid(raid) {
@@ -271,21 +281,24 @@ function renderCharacter(account, character, maxAttempts) {
     );
   });
   return make("div", "character-card",
-    make("div", "character-header", make("strong", "", character.name), actions),
+    make("div", "character-header", characterIdentity(character), actions),
     make("div", "raid-list", ...rows)
   );
 }
 
 function renderAccount(account, characters, maxAttempts) {
-  const avatar = make("span", "account-avatar", Array.from(account.name.trim())[0] || "账");
-  avatar.setAttribute("aria-hidden", "true");
   const done = account.characters.filter((character) => character.staminaDone).length;
   const progress = currentTool() === "stamina"
     ? "体力 " + done + "/" + account.characters.length
     : account.characters.length + " 个角色";
   const header = make("div", "account-header",
-    avatar,
-    make("div", "account-heading", make("strong", "", account.name), make("small", "", progress)),
+    make("div", "account-heading",
+      make("div", "account-name-line",
+        make("span", "entry-kind entry-kind--account", "账号"),
+        make("strong", "account-name", account.name)
+      ),
+      make("small", "", progress)
+    ),
     make("div", "account-actions",
       accountButton("＋ 添加角色", "add-character", account),
       accountButton("改名", "rename-account", account),
@@ -297,7 +310,7 @@ function renderAccount(account, characters, maxAttempts) {
   }
   if (currentTool() === "stamina") {
     const rows = characters.map((character) => make("div", "stamina-row",
-      staminaButton(account, character, character.name),
+      staminaButton(account, character, characterIdentity(character)),
       make("div", "character-actions",
         accountButton("改名", "rename-character", account, character),
         accountButton("删除", "delete-character", account, character)
