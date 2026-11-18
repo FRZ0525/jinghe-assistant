@@ -15,6 +15,12 @@
   const BACKUP_LIMIT = 4000000;
   const DEFAULT_ZONE_NAME = "默认区";
   const LEGACY_ZONE_ID = "zone-default";
+  const ACCOUNT_TOTAL_ATTEMPTS = 180;
+  const ROLE_CHARGE = 1;
+  const ACCOUNT_TOTAL_CHARGE = 2;
+  const ACCOUNT_RAID_CHARGE = 4;
+  const CHARACTER_TOTAL_CHARGE = 8;
+  const ALL_CHARGES = ROLE_CHARGE | ACCOUNT_TOTAL_CHARGE | ACCOUNT_RAID_CHARGE | CHARACTER_TOTAL_CHARGE;
   const SHANGHAI_CLOCK = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
     year: "numeric",
@@ -184,12 +190,286 @@
     return { id: createId("zone"), name: name || DEFAULT_ZONE_NAME, characters: [] };
   }
 
-  function createAccount(name) {
+  function createAccountRaidQuota() {
+    return {
+      total: { remaining: ACCOUNT_TOTAL_ATTEMPTS, maxAttempts: ACCOUNT_TOTAL_ATTEMPTS },
+      raids: [],
+    };
+  }
+
+  function createAccount(name, serverId) {
     return {
       id: createId("account"),
       name: name || "新账号",
       zones: [createZone(DEFAULT_ZONE_NAME)],
+      ...(serverId === "regular" ? { raidQuota: createAccountRaidQuota() } : {}),
     };
+  }
+
+  function normalizeQuota(value) {
+    if (!hasRaidLimit(value)) return null;
+    return {
+      remaining: clampRemaining(value.maxAttempts, value.remaining),
+      maxAttempts: value.maxAttempts,
+    };
+  }
+
+  function normalizeAccountRaidQuota(value, raidCatalog) {
+    const quota = createAccountRaidQuota();
+    quota.total = normalizeQuota(value?.total) || quota.total;
+    const byName = new Map();
+    for (const entry of Array.isArray(value?.raids) ? value.raids : []) {
+      const key = raidNameKey(entry?.name);
+      const normalized = normalizeQuota(entry);
+      if (key && normalized && !byName.has(key)) byName.set(key, normalized);
+    }
+    for (const { name } of raidCatalog) {
+      const entry = byName.get(raidNameKey(name));
+      if (entry) quota.raids.push({ name, ...entry });
+    }
+    return quota;
+  }
+
+  function getAccountRaidQuota(account, name = null) {
+    const quota = account?.raidQuota;
+    if (!quota) return null;
+    if (name === null) return quota.total || null;
+    return Array.isArray(quota.raids) ? findRaid(quota.raids, name) || null : null;
+  }
+
+  function getCharacterRaidQuota(character) {
+    return character?.raidRewardQuota || null;
+  }
+
+  function validQuota(value) {
+    return hasRaidLimit(value) && Number.isSafeInteger(value.remaining) &&
+      value.remaining >= 0 && value.remaining <= value.maxAttempts;
+  }
+
+  function setCharacterRaidQuota(character, value) {
+    if (!Array.isArray(character?.raids) || (value !== null && !validQuota(value))) return false;
+    if (value === null) {
+      if (!getCharacterRaidQuota(character)) return false;
+      delete character.raidRewardQuota;
+    } else {
+      character.raidRewardQuota = normalizeQuota(value);
+    }
+    for (const raid of character.raids) clearCharge(raid, CHARACTER_TOTAL_CHARGE);
+    return true;
+  }
+
+  function explicitCharge(raid) {
+    const value = raid?.quotaCharge;
+    if (value === undefined) return undefined;
+    return Number.isInteger(value) && value >= 0 && value <= ALL_CHARGES ? value : 0;
+  }
+
+  function normalizeRaidClears(value, allowed = ALL_CHARGES) {
+    const clears = [];
+    const ids = new Set();
+    for (const entry of value) {
+      const id = entry?.id;
+      if (typeof id !== "string" || !id.trim() || id.length > 128 || ids.has(id)) continue;
+      ids.add(id);
+      const charge = Number.isInteger(entry.charge) && entry.charge >= 0 && entry.charge <= ALL_CHARGES
+        ? entry.charge & allowed : 0;
+      const clear = { id, charge };
+      if (Number.isSafeInteger(entry.recordedAt) && entry.recordedAt >= 0 && entry.recordedAt <= 8_640_000_000_000_000) {
+        clear.recordedAt = entry.recordedAt;
+      }
+      clears.push(clear);
+    }
+    return clears;
+  }
+
+  function getRaidClears(raid) {
+    if (Array.isArray(raid?.clearsToday)) return normalizeRaidClears(raid.clearsToday);
+    if (raid?.doneToday) return [{ id: "legacy", charge: explicitCharge(raid) ?? ROLE_CHARGE }];
+    return [];
+  }
+
+  function writeRaidClears(raid, clears) {
+    raid.doneToday = clears.length > 0;
+    delete raid.quotaCharge;
+    if (clears.length) raid.clearsToday = clears;
+    else delete raid.clearsToday;
+  }
+
+  function clearCharge(raid, mask) {
+    const previous = getRaidClears(raid);
+    if (!previous.some(({ charge }) => charge & mask)) return false;
+    const clears = previous.map((clear) => ({ ...clear, charge: clear.charge & ~mask }));
+    if (Array.isArray(raid.clearsToday)) writeRaidClears(raid, clears);
+    else raid.quotaCharge = clears[0].charge;
+    return true;
+  }
+
+  function clearRaidCharge(raid) {
+    return clearCharge(raid, ROLE_CHARGE);
+  }
+
+  function setAccountRaidQuota(account, name, value) {
+    if (!Array.isArray(account?.raidQuota?.raids) || (name !== null && !raidNameKey(name))) return false;
+    const current = getAccountRaidQuota(account, name);
+    if (value === null) {
+      if (name === null || !current) return false;
+      account.raidQuota.raids.splice(account.raidQuota.raids.indexOf(current), 1);
+    } else {
+      if (!validQuota(value)) return false;
+      const next = normalizeQuota(value);
+      if (name === null) account.raidQuota.total = next;
+      else if (current) Object.assign(current, next);
+      else account.raidQuota.raids.push({ name: name.trim(), ...next });
+    }
+    const key = raidNameKey(name);
+    for (const zone of account.zones || []) {
+      for (const character of zone.characters) {
+        for (const raid of character.raids) {
+          if (name === null) clearCharge(raid, ACCOUNT_TOTAL_CHARGE);
+          else if (raidNameKey(raid.name) === key) clearCharge(raid, ACCOUNT_RAID_CHARGE);
+        }
+      }
+    }
+    return true;
+  }
+
+  function clearBalances(account, character, raid) {
+    return [
+      { code: "character-raid", flag: ROLE_CHARGE, quota: raid },
+      { code: "character-total", flag: CHARACTER_TOTAL_CHARGE, quota: getCharacterRaidQuota(character) },
+      { code: "account-raid", flag: ACCOUNT_RAID_CHARGE, quota: getAccountRaidQuota(account, raid.name) },
+      { code: "account-total", flag: ACCOUNT_TOTAL_CHARGE, quota: getAccountRaidQuota(account) },
+    ].filter(({ quota }) => quota);
+  }
+
+  function raidClearBlockers(account, character, raid) {
+    if (!raidNameKey(raid?.name)) return ["character-raid"];
+    return clearBalances(account, character, raid)
+      .filter(({ quota }) => !(quota.remaining > 0))
+      .map(({ code }) => code);
+  }
+
+  function raidOwner(account, raid) {
+    for (const zone of account?.zones || []) {
+      const owner = zone.characters.find((character) => character.raids.includes(raid));
+      if (owner) return owner;
+    }
+    return null;
+  }
+
+  function canCompleteRaid(account, raid) {
+    return Boolean(raid && !raid.doneToday && !raidClearBlockers(account, raidOwner(account, raid), raid).length);
+  }
+
+  function debitRaidClear(server, account, character, raid) {
+    if (server.serverId === "regular" && !account.raidQuota) account.raidQuota = createAccountRaidQuota();
+    let charge = 0;
+    for (const { flag, quota } of clearBalances(account, character, raid)) {
+      quota.remaining -= 1;
+      charge |= flag;
+    }
+    return charge;
+  }
+
+  function refundRaidClear(server, account, character, raid, charge) {
+    for (const { flag, quota } of clearBalances(account, character, raid)) {
+      if (!(charge & flag)) continue;
+      const max = flag === ROLE_CHARGE ? raidLimit(server, raid) : quota.maxAttempts;
+      quota.remaining = Math.min(max, quota.remaining + 1);
+    }
+  }
+
+  function recordRaidClear(server, account, character, raid) {
+    if (!server || !account || !character || !raid || raidOwner(account, raid) !== character ||
+        raidClearBlockers(account, character, raid).length) return null;
+    const clears = getRaidClears(raid);
+    const id = globalThis.crypto?.randomUUID?.() ?? createId("raid-clear");
+    const recordedAt = Date.now();
+    const charge = debitRaidClear(server, account, character, raid);
+    writeRaidClears(raid, [...clears, { id, charge, recordedAt }]);
+    return id;
+  }
+
+  function undoRaidClear(server, account, character, raid, id) {
+    if (!server || !account || !character || !raid || raidOwner(account, raid) !== character) return false;
+    const clears = getRaidClears(raid);
+    const chosen = clears.find((clear) => clear.id === id);
+    if (!chosen) return false;
+    refundRaidClear(server, account, character, raid, chosen.charge);
+    writeRaidClears(raid, clears.filter((clear) => clear !== chosen));
+    return true;
+  }
+
+  function raidCompletionState(server, raid) {
+    return {
+      doneToday: raid.doneToday,
+      remaining: raid.remaining,
+      quotaCharge: raid.quotaCharge,
+      clearsToday: raid.clearsToday,
+      maxAttempts: raidLimit(server, raid),
+    };
+  }
+
+  function applyRaidCompletion(server, account, raid, doneToday) {
+    if (!server || !account || !raid || typeof doneToday !== "boolean" || raid.doneToday === doneToday) return null;
+    const character = raidOwner(account, raid);
+    if (doneToday && raidClearBlockers(account, character, raid).length) return null;
+    if (server.serverId === "regular" && !account.raidQuota) account.raidQuota = createAccountRaidQuota();
+    const before = raidCompletionState(server, raid);
+    const quotas = clearBalances(account, character, raid).filter(({ flag }) => flag !== ROLE_CHARGE)
+      .map(({ flag, quota }) => ({ flag, quota, before: quota.remaining, maxAttempts: quota.maxAttempts }));
+    if (doneToday) {
+      const charge = debitRaidClear(server, account, character, raid);
+      delete raid.clearsToday;
+      raid.doneToday = true;
+      if (server.serverId === "regular" || (charge & CHARACTER_TOTAL_CHARGE)) raid.quotaCharge = charge;
+    } else {
+      const clears = getRaidClears(raid);
+      const last = clears.pop();
+      if (!last) return null;
+      refundRaidClear(server, account, character, raid, last.charge);
+      writeRaidClears(raid, clears);
+    }
+    const changes = quotas.filter(({ quota, before }) => quota.remaining !== before)
+      .map(({ flag, quota, before, maxAttempts }) => ({ flag, before, after: quota.remaining, maxAttempts }));
+    const characterQuota = changes.find(({ flag }) => flag === CHARACTER_TOTAL_CHARGE);
+    return {
+      serverId: server.serverId,
+      accountId: account.id,
+      raidName: raid.name,
+      before,
+      after: raidCompletionState(server, raid),
+      accountQuotas: changes.filter(({ flag }) => flag !== CHARACTER_TOTAL_CHARGE)
+        .map(({ flag, ...change }) => ({ name: flag === ACCOUNT_TOTAL_CHARGE ? null : raid.name, ...change })),
+      ...(characterQuota ? { characterQuota } : {}),
+    };
+  }
+
+  function undoRaidCompletion(server, account, raid, operation) {
+    if (!server || !account || !raid || !operation || operation.serverId !== server.serverId || operation.accountId !== account.id ||
+        operation.raidName !== raid.name) return false;
+    const current = raidCompletionState(server, raid);
+    if (!Object.entries(operation.after).every(([key, value]) => (
+      key === "clearsToday" ? JSON.stringify(current[key]) === JSON.stringify(value) : current[key] === value
+    ))) return false;
+    const quotas = operation.accountQuotas.map((change) => ({
+      change, quota: getAccountRaidQuota(account, change.name),
+    }));
+    if (operation.characterQuota) {
+      quotas.push({ change: operation.characterQuota, quota: getCharacterRaidQuota(raidOwner(account, raid)) });
+    }
+    if (!quotas.every(({ quota, change }) => quota?.remaining === change.after && quota.maxAttempts === change.maxAttempts)) {
+      return false;
+    }
+    const { doneToday, remaining, quotaCharge, clearsToday } = operation.before;
+    raid.doneToday = doneToday;
+    raid.remaining = remaining;
+    if (quotaCharge === undefined) delete raid.quotaCharge;
+    else raid.quotaCharge = quotaCharge;
+    if (clearsToday === undefined) delete raid.clearsToday;
+    else raid.clearsToday = clearsToday;
+    for (const { quota, change } of quotas) quota.remaining = change.before;
+    return true;
   }
 
   function normalizeSiblings(value, prefix, normalize) {
@@ -239,27 +519,39 @@
     return profile;
   }
 
-  function normalizeCharacter(source, id, index, activeRaids, maxAttempts) {
+  function normalizeCharacter(source, id, index, activeRaids, maxAttempts, quotaRaids) {
     const sourceRaids = Array.isArray(source.raids) ? source.raids : [];
     const byName = new Map();
     for (const raid of sourceRaids) {
       const key = raidNameKey(raid?.name);
       if (key && !byName.has(key)) byName.set(key, raid);
     }
+    const characterQuota = quotaRaids ? normalizeQuota(source.raidRewardQuota) : null;
     return {
       id,
       name: normalizeName(source.name, "角色" + (index + 1)),
       staminaDone: source.staminaDone === true,
       ...normalizeCharacterProfile(source),
+      ...(characterQuota ? { raidRewardQuota: characterQuota } : {}),
       raids: activeRaids.map(function normalizeRaid(raidName) {
         const existing = byName.get(raidNameKey(raidName));
+        const allowed = ROLE_CHARGE
+          | (characterQuota ? CHARACTER_TOTAL_CHARGE : 0)
+          | (quotaRaids ? ACCOUNT_TOTAL_CHARGE : 0)
+          | (quotaRaids?.has(raidName) ? ACCOUNT_RAID_CHARGE : 0);
+        const explicitClears = Array.isArray(existing?.clearsToday);
+        const clears = explicitClears ? normalizeRaidClears(existing.clearsToday, allowed) : [];
+        const doneToday = explicitClears ? clears.length > 0 : existing?.doneToday === true;
+        const charge = !explicitClears && doneToday ? explicitCharge(existing) : undefined;
         return {
           name: raidName,
           remaining: existing
             ? clampRemaining(raidLimit(maxAttempts, existing), existing.remaining)
             : maxAttempts,
-          doneToday: existing ? existing.doneToday === true : false,
+          doneToday,
           ...(hasRaidLimit(existing) ? { maxAttempts: existing.maxAttempts } : {}),
+          ...(charge === undefined ? {} : { quotaCharge: charge & allowed }),
+          ...(clears.length ? { clearsToday: clears } : {}),
         };
       }),
     };
@@ -282,14 +574,17 @@
         const sourceZones = Array.isArray(account.zones)
           ? account.zones
           : [{ id: LEGACY_ZONE_ID, name: DEFAULT_ZONE_NAME, characters: account.characters }];
+        const raidQuota = def.id === "regular" ? normalizeAccountRaidQuota(account.raidQuota, raidCatalog) : null;
+        const quotaRaids = raidQuota ? new Set(raidQuota.raids.map(({ name }) => name)) : null;
         return {
           id,
           name: normalizeName(account.name, "账号" + (accountIndex + 1)),
+          ...(raidQuota ? { raidQuota } : {}),
           zones: normalizeSiblings(sourceZones, "zone", (zone, zoneId, zoneIndex) => ({
             id: zoneId,
             name: normalizeName(zone.name, "区服" + (zoneIndex + 1)),
             characters: normalizeSiblings(zone.characters, "character", (character, characterId, index) =>
-              normalizeCharacter(character, characterId, index, activeRaids, maxAttempts)
+              normalizeCharacter(character, characterId, index, activeRaids, maxAttempts, quotaRaids)
             ),
           })),
         };
@@ -344,7 +639,7 @@
     return server.accounts.flatMap((account) => account.zones);
   }
 
-  function summarize(serverState) {
+  function summarize(serverState, { repeatable = false } = {}) {
     const server = normalizeServerState(serverState && serverState.serverId, serverState);
     const details = new Map(server.raidCatalog.map((raid) => [raid.name, raid.detail]));
     const totals = new Map(server.activeRaids.map((name) => [name, {
@@ -363,27 +658,27 @@
     let raidsPending = 0;
 
     const zones = serverZones(server);
-    zones.forEach(function walkZone(zone) {
-      zone.characters.forEach(function walkCharacter(character) {
-        characterCount += 1;
-        if (character.staminaDone) staminaDone += 1;
-        character.raids.forEach(function walkRaid(raid) {
-          const bucket = totals.get(raid.name);
-          if (!bucket) return;
-          bucket.characters += 1;
-          bucket.remaining += raid.remaining;
-          if (raid.doneToday) {
-            bucket.doneToday += 1;
-            raidsDoneToday += 1;
+    for (const account of server.accounts) {
+      for (const zone of account.zones) {
+        for (const character of zone.characters) {
+          characterCount += 1;
+          if (character.staminaDone) staminaDone += 1;
+          for (const raid of character.raids) {
+            const bucket = totals.get(raid.name);
+            const clears = repeatable ? getRaidClears(raid).length : Number(raid.doneToday);
+            const pending = (repeatable || !raid.doneToday) && !raidClearBlockers(account, character, raid).length;
+            bucket.characters += 1;
+            bucket.remaining += raid.remaining;
+            bucket.doneToday += clears;
+            raidsDoneToday += clears;
+            const required = repeatable ? clears + Number(pending) : Number(clears > 0 || pending);
+            bucket.requiredToday += required;
+            raidsRequiredToday += required;
+            if (pending) raidsPending += 1;
           }
-          if (raid.doneToday || raid.remaining > 0) {
-            bucket.requiredToday += 1;
-            raidsRequiredToday += 1;
-          }
-          if (!raid.doneToday && raid.remaining > 0) raidsPending += 1;
-        });
-      });
-    });
+        }
+      }
+    }
 
     return {
       serverId: server.serverId,
@@ -407,23 +702,45 @@
       zone.characters.forEach(function resetCharacter(character) {
         character.staminaDone = false;
         character.raids.forEach(function resetRaid(raid) {
-          raid.doneToday = false;
+          writeRaidClears(raid, []);
         });
       });
     });
     return server;
   }
 
-  function resetRaidCycle(serverState) {
+  function resetRaidCycle(serverState, { accountId = "", raidName = "", restoreTotal = !raidName } = {}) {
     const server = normalizeServerState(serverState && serverState.serverId, serverState);
-    serverZones(server).forEach(function resetZone(zone) {
-      zone.characters.forEach(function resetCharacter(character) {
-        character.raids.forEach(function resetRaid(raid) {
-          raid.remaining = raidLimit(server, raid);
-          raid.doneToday = false;
-        });
-      });
-    });
+    const selectedRaid = raidNameKey(raidName);
+    const inScope = (raid) => !selectedRaid || raidNameKey(raid.name) === selectedRaid;
+    for (const account of server.accounts) {
+      if (accountId && account.id !== accountId) continue;
+      if (account.raidQuota && restoreTotal) {
+        const { maxAttempts } = account.raidQuota.total;
+        setAccountRaidQuota(account, null, { maxAttempts, remaining: maxAttempts });
+      }
+      for (const quota of account.raidQuota?.raids || []) {
+        if (inScope(quota)) quota.remaining = quota.maxAttempts;
+      }
+      for (const zone of account.zones) {
+        for (const character of zone.characters) {
+          const characterQuota = getCharacterRaidQuota(character);
+          if (!selectedRaid && characterQuota) {
+            setCharacterRaidQuota(character, { remaining: characterQuota.maxAttempts, maxAttempts: characterQuota.maxAttempts });
+          }
+          for (const raid of character.raids) {
+            if (!inScope(raid)) continue;
+            raid.remaining = raidLimit(server, raid);
+            const mask = ROLE_CHARGE | ACCOUNT_RAID_CHARGE;
+            const retained = getRaidClears(raid)
+              .map((clear) => ({ ...clear, charge: clear.charge & ~mask }))
+              .filter(({ charge }) => charge > 0);
+            if (Array.isArray(raid.clearsToday) || !retained.length) writeRaidClears(raid, retained);
+            else raid.quotaCharge = retained[0].charge;
+          }
+        }
+      }
+    }
     return server;
   }
 
@@ -439,7 +756,18 @@
   }
 
   function setMaxAttempts(serverState, maxAttempts) {
-    return normalizeServerState(serverState?.serverId, { ...serverState, maxAttempts });
+    const server = normalizeServerState(serverState?.serverId, { ...serverState, maxAttempts });
+    const before = clampMax(serverState?.maxAttempts, getServerDef(server.serverId).defaultMaxAttempts);
+    if (server.maxAttempts !== before) {
+      for (const zone of serverZones(server)) {
+        for (const character of zone.characters) {
+          for (const raid of character.raids) {
+            if (!hasRaidLimit(raid)) clearRaidCharge(raid);
+          }
+        }
+      }
+    }
+    return server;
   }
 
   function moveActiveRaid(serverState, slotIndex, nextName) {
@@ -496,6 +824,10 @@
 
     raid.name = nextName;
     server.activeRaids = server.activeRaids.map((name) => name === previousName ? nextName : name);
+    for (const account of server.accounts) {
+      const quota = getAccountRaidQuota(account, previousName);
+      if (quota) quota.name = nextName;
+    }
     for (const zone of serverZones(server)) {
       for (const character of zone.characters) {
         const record = character.raids.find((entry) => entry.name === previousName);
@@ -817,7 +1149,7 @@
         if (server.accounts.length >= ACCOUNT_LIMIT) {
           throw new Error(location + label + "账号超过 " + ACCOUNT_LIMIT + " 个");
         }
-        account = createAccount(row.account);
+        account = createAccount(row.account, server.serverId);
         account.zones[0].name = row.zone;
         server.accounts.push(account);
         addedAccounts += 1;
@@ -970,7 +1302,8 @@
       if (!entry) {
         character.raids.push({ name: option.name, remaining, maxAttempts: row.denominator, doneToday: false });
       } else {
-        if (entry.remaining === remaining && entry.maxAttempts === row.denominator) continue;
+        const chargeCleared = clearRaidCharge(entry);
+        if (entry.remaining === remaining && entry.maxAttempts === row.denominator && !chargeCleared) continue;
         Object.assign(entry, { remaining, maxAttempts: row.denominator });
       }
       updatedRaids += 1;
@@ -1012,6 +1345,18 @@
         added.zones += incoming.zones.length;
         added.characters += incoming.zones.reduce((total, zone) => total + zone.characters.length, 0);
         continue;
+      }
+
+      // Keep the current shared balance. Charges on imported roles cannot be refunded against it.
+      if (account.raidQuota) {
+        for (const quota of incoming.raidQuota.raids) {
+          if (!getAccountRaidQuota(account, quota.name)) account.raidQuota.raids.push(quota);
+        }
+        for (const zone of incoming.zones) {
+          for (const character of zone.characters) {
+            for (const raid of character.raids) clearCharge(raid, ACCOUNT_TOTAL_CHARGE | ACCOUNT_RAID_CHARGE);
+          }
+        }
       }
 
       for (const importedZone of incoming.zones) {
@@ -1076,6 +1421,7 @@
     CHARACTER_LIMIT: CHARACTER_LIMIT,
     BACKUP_LIMIT: BACKUP_LIMIT,
     DEFAULT_ZONE_NAME: DEFAULT_ZONE_NAME,
+    ACCOUNT_TOTAL_ATTEMPTS: ACCOUNT_TOTAL_ATTEMPTS,
     getServerDef: getServerDef,
     getRaidMode: getRaidMode,
     getRaidCatalog: getRaidCatalog,
@@ -1091,6 +1437,18 @@
     parseRaidCountText: parseRaidCountText,
     importRaidCounts: importRaidCounts,
     raidLimit: raidLimit,
+    getAccountRaidQuota: getAccountRaidQuota,
+    setAccountRaidQuota: setAccountRaidQuota,
+    getCharacterRaidQuota: getCharacterRaidQuota,
+    setCharacterRaidQuota: setCharacterRaidQuota,
+    clearRaidCharge: clearRaidCharge,
+    raidClearBlockers: raidClearBlockers,
+    getRaidClears: getRaidClears,
+    recordRaidClear: recordRaidClear,
+    undoRaidClear: undoRaidClear,
+    canCompleteRaid: canCompleteRaid,
+    applyRaidCompletion: applyRaidCompletion,
+    undoRaidCompletion: undoRaidCompletion,
     createAccount: createAccount,
     createZone: createZone,
     createServerState: createServerState,

@@ -4,18 +4,46 @@ const Tracker = window.Tracker;
 const STORAGE_KEY = "jinghe-assistant-v2";
 const LEGACY_STORAGE_KEY = "jinghe-assistant-v1";
 const UI_KEY = "jinghe-assistant-ui-v1";
+const FONT_KEY = "jinghe-assistant-font-v1";
+const FONT_PRESETS = new Set(["system", "rounded", "clear", "journal"]);
+const RAID_LIMIT_LABELS = {
+  "character-raid": "角色单本",
+  "character-total": "角色总奖励",
+  "account-raid": "账号单本",
+  "account-total": "账号总奖励",
+};
+const clearTime = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+});
 const byId = (id) => document.getElementById(id);
+const market = window.JingheMarket?.mount();
+const toolNav = byId("tool-nav");
+const toolButtons = toolNav.querySelectorAll("button[data-tool]");
 const accountList = byId("account-list");
 const actionDialog = byId("action-dialog");
 const backupDialog = byId("backup-dialog");
 const batchDialog = byId("batch-dialog");
 const raidCatalogDialog = byId("raid-catalog-dialog");
+const raidQuotaDialog = byId("raid-quota-dialog");
+const raidClearsDialog = byId("raid-clears-dialog");
+const restoreDialog = byId("raid-restore-dialog");
+const recoveryDialog = byId("recovery-dialog");
+const fontDialog = byId("font-settings-dialog");
+const fontChoices = fontDialog.querySelectorAll('input[name="font-preset"]');
+const fontNote = byId("font-settings-note");
+const defaultFontNote = fontNote.textContent;
+const searchInput = byId("role-search");
+const searchClear = byId("clear-role-search");
+const searchResults = byId("search-results");
+const searches = new Map();
+let composingSearch = false;
 const backupInput = byId("backup-input");
 const compactLayout = window.matchMedia("(max-width: 859px)");
 
 let storageNotice = "保存在此浏览器";
 let needsMigration = false;
 let storageReadError = false;
+let deviceSync = null;
 let state = readState(true);
 const preferences = readPreferences();
 let settingsExpanded = !compactLayout.matches;
@@ -23,6 +51,10 @@ let pendingAction = null;
 let toastTimer = null;
 let pendingUndo = null;
 let batchContext = null;
+let quotaContext = null;
+let raidClearsContext = null;
+let restoreServerId = null;
+let recoveryWriting = false;
 
 state.activeServer = "regular";
 
@@ -56,7 +88,7 @@ function readPreferences() {
     return [server, {
       tool: saved?.tool === "stamina" ? "stamina" : "raids",
       filters: {
-        raids: ["stamina", "raid"].includes(filters?.raids) ? filters.raids : "all",
+        raids: filters?.raids === "raid" ? "raid" : "all",
         stamina: filters?.stamina === "stamina" ? "stamina" : "all",
       },
       collapsed: Array.isArray(saved?.collapsed)
@@ -72,6 +104,22 @@ function savePreferences() {
   } catch {
     // Preferences still apply while this page is open.
   }
+}
+
+function applyFontPreset(value) {
+  const preset = FONT_PRESETS.has(value) ? value : "system";
+  document.documentElement.dataset.fontPreset = preset;
+  for (const choice of fontChoices) choice.checked = choice.value === preset;
+}
+
+function restoreFontPreset() {
+  let saved;
+  try {
+    saved = localStorage.getItem(FONT_KEY);
+  } catch {
+    fontNote.textContent = "字体可在当前页面切换。";
+  }
+  applyFontPreset(saved);
 }
 
 function currentFilter() {
@@ -96,13 +144,14 @@ function renderStorageStatus() {
   status.dataset.state = /无法|未保存/.test(storageNotice) ? "error" : "ready";
 }
 
-function saveState() {
+function saveState(notifySync = true) {
   try {
     if (storageReadError) return false;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     needsMigration = false;
     storageNotice = "已保存到此浏览器";
     renderStorageStatus();
+    if (notifySync) deviceSync?.localChanged();
     return true;
   } catch (error) {
     storageNotice = "未保存 · 请导出备份";
@@ -112,14 +161,69 @@ function saveState() {
   }
 }
 
-function resetAtBoundary() {
+function changedServers(before, after) {
+  return ["regular", "season"].filter((id) => JSON.stringify(before.servers[id]) !== JSON.stringify(after.servers[id]));
+}
+
+function scopedSnapshot(snapshot, ids) {
+  return {
+    dailyDate: snapshot.dailyDate,
+    dailyResetHour: snapshot.dailyResetHour,
+    servers: Object.fromEntries(ids.map((id) => [id, snapshot.servers[id]])),
+  };
+}
+
+async function saveRestorable(label, nextState, replaceUnreadable = false) {
+  if (recoveryWriting) throw new Error("有一项批量操作正在保存，请稍后再试。");
+  recoveryWriting = true;
+  const previous = state;
+  const readError = storageReadError;
+  let pointId;
+  try {
+    const before = Tracker.snapshotApp(previous);
+    const after = Tracker.snapshotApp(nextState);
+    const ids = changedServers(before, after);
+    if (ids.length) {
+      try {
+        pointId = await window.JingheRecovery.add({
+          label,
+          createdAt: Date.now(),
+          before: scopedSnapshot(before, ids),
+          after: scopedSnapshot(after, ids),
+        });
+      } catch {
+        throw new Error("无法保存恢复点，请检查浏览器存储后重试。");
+      }
+    }
+    if (state !== previous || changedServers(before, Tracker.snapshotApp(state)).length) {
+      throw new Error("记录刚刚更新，请重新预览后保存。");
+    }
+    state = nextState;
+    if (replaceUnreadable) storageReadError = false;
+    if (saveState()) {
+      if (pointId) void window.JingheRecovery.trim().catch(() => {});
+      return true;
+    }
+    state = previous;
+    storageReadError = readError;
+    if (pointId) await window.JingheRecovery.remove(pointId).catch(() => {});
+    return false;
+  } catch (error) {
+    if (pointId) await window.JingheRecovery.remove(pointId).catch(() => {});
+    throw error;
+  } finally {
+    recoveryWriting = false;
+  }
+}
+
+function resetAtBoundary(notifySync = true) {
   const now = new Date();
   if (state.dailyDate === Tracker.dailyCycleKey(now) && state.dailyResetHour === Tracker.DAILY_RESET_HOUR) {
     return false;
   }
   const result = Tracker.ensureDailyReset(state, now);
   state = result.state;
-  saveState();
+  saveState(notifySync);
   return result.reset;
 }
 
@@ -150,6 +254,36 @@ function changeTool(tool) {
 function currentServer() {
   return state.servers[state.activeServer];
 }
+
+function searchKey(value) {
+  return value.normalize("NFKC").trim().toLocaleLowerCase();
+}
+
+function currentSearch() {
+  return searchKey(searches.get(state.activeServer) || "");
+}
+
+function updateSearch() {
+  const previous = searches.get(state.activeServer) || "";
+  if (searchInput.value === previous) return;
+  searches.set(state.activeServer, searchInput.value);
+  if (resetAtBoundary()) render();
+  else renderAccounts();
+}
+
+searchInput.addEventListener("compositionstart", () => { composingSearch = true; });
+searchInput.addEventListener("compositionend", () => {
+  composingSearch = false;
+  updateSearch();
+});
+searchInput.addEventListener("input", (event) => {
+  if (!composingSearch && !event.isComposing) updateSearch();
+});
+searchClear.addEventListener("click", () => {
+  searchInput.value = "";
+  searchInput.focus({ preventScroll: true });
+  updateSearch();
+});
 
 
 function toneIndex(value, modulo) {
@@ -218,18 +352,23 @@ function recordCompletion(changes, message) {
       return;
     }
     let restored = 0;
-    for (const { ref, before, after } of changes) {
+    for (const { ref, before, after, clearId } of changes.slice().reverse()) {
       const entry = records(ref);
-      const target = ref.raid ? entry.raid : entry.character;
+      if (clearId) {
+        if (Tracker.undoRaidClear(entry.server, entry.account, entry.character, entry.raid, clearId)) {
+          restored += 1;
+        }
+        continue;
+      }
+      const target = entry.character;
       if (!target || !Object.entries(after).every(([field, value]) => target[field] === value)) continue;
-      if (ref.raid && before.remaining > Tracker.raidLimit(entry.server, entry.raid)) continue;
       Object.assign(target, before);
       restored += 1;
     }
     if (restored) {
       const undoSaved = saveState();
       render();
-      showToast(undoSaved ? "已撤销 " + restored + " 个角色的记录" : "已撤销，请导出备份");
+      showToast(undoSaved ? "已撤销 " + restored + " 笔记录" : "已撤销，请导出备份");
     } else {
       showToast("这些记录已经更新");
     }
@@ -243,53 +382,22 @@ function summaryText(summary) {
   return "体力待刷 " + summary.staminaPending + " · 副本待打 " + summary.raidsPending;
 }
 
-function metric(label, value, detail, action) {
-  const fields = [
-    make("span", "metric-label", label),
-    make("strong", "metric-value", String(value)),
-    make("small", "metric-detail", detail),
-  ];
-  const tool = action === "stamina" ? "stamina" : "raids";
-  const control = button("", "metric metric--link", { metric: action });
-  const arrow = make("span", "metric-arrow", "↗");
-  arrow.setAttribute("aria-hidden", "true");
-  control.append(...fields, arrow);
-  control.setAttribute("aria-pressed", String(currentTool() === tool));
-  control.dataset.cleared = String(value === 0);
-  control.setAttribute("aria-label", label + " " + value + "，查看待办");
-  return control;
-}
-
-byId("metrics").addEventListener("click", (event) => {
-  const control = event.target.closest("button[data-metric]");
-  if (!control) return;
-  const filter = control.dataset.metric;
-  resetAtBoundary();
-  changeTool(filter === "raid" ? "raids" : "stamina");
-  changeFilter(filter);
-  render();
-  const title = byId("accounts-title");
-  title.focus({ preventScroll: true });
-  title.scrollIntoView({ block: "start" });
-});
-
-function renderMetrics() {
-  const regular = Tracker.summarize(state.servers.regular);
-  const season = Tracker.summarize(state.servers.season);
+function renderOverview() {
+  const regular = Tracker.summarize(state.servers.regular, { repeatable: true });
+  const season = Tracker.summarize(state.servers.season, { repeatable: true });
   const selected = state.activeServer === "regular" ? regular : season;
   byId("regular-summary").textContent = summaryText(regular);
   byId("season-summary").textContent = summaryText(season);
   byId("roster-meta").textContent = selected.accountCount + " 个账号 · " + selected.zoneCount + " 个区服 · " + selected.characterCount + " 个角色";
-  byId("metrics").replaceChildren(
-    metric("体力待刷", selected.staminaPending, "已刷 " + selected.staminaDone + " 个角色", "stamina"),
-    metric("副本待打", selected.raidsPending, "今日已打 " + selected.raidsDoneToday + " 项", "raid")
-  );
+  byId("tool-raid-summary").textContent = "可打 " + selected.raidsPending + " 项 · 已打 " + selected.raidsDoneToday + " 次";
+  byId("tool-stamina-summary").textContent = "待刷 " + selected.staminaPending + " · 已刷 " + selected.staminaDone;
+  if (currentTool() !== "raids") return;
   const overview = byId("raid-overview");
   overview.hidden = !selected.characterCount;
   overview.replaceChildren(...selected.raids.map((raid) => (
     make("div", "raid-summary",
       make("strong", "", raid.name),
-      make("small", "", "剩余 " + raid.remaining + " 次 · 今日已打 " + raid.doneToday)
+      make("small", "", "剩余 " + raid.remaining + " 次 · 今日已打 " + raid.doneToday + " 次")
     )
   )));
 }
@@ -307,10 +415,13 @@ byId("toggle-raid-settings").addEventListener("click", () => {
 });
 byId("jump-to-settings").addEventListener("click", () => {
   closeMenus();
+  resetAtBoundary();
+  changeTool("raids");
   settingsExpanded = true;
-  renderSettingsExpansion();
+  render();
   byId("toggle-raid-settings").focus({ preventScroll: true });
-  byId("raid-settings").scrollIntoView({ block: "start" });
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  byId("raid-settings").scrollIntoView({ block: "start", behavior: reducedMotion ? "instant" : "smooth" });
 });
 
 compactLayout.addEventListener("change", () => {
@@ -330,7 +441,7 @@ function renderSettings() {
   byId("max-attempts").textContent = String(server.maxAttempts);
   byId("decrease-attempts").disabled = server.maxAttempts <= 1;
   byId("increase-attempts").disabled = server.maxAttempts >= 10;
-  byId("restore-raids").disabled = !characterTotal(server);
+  byId("restore-raids").disabled = !(server.serverId === "regular" ? server.accounts.length : characterTotal(server));
 
   const catalog = Tracker.getRaidCatalog(server);
   const controls = byId("raid-controls");
@@ -356,15 +467,20 @@ function renderSettings() {
 }
 
 function renderFilters() {
-  const options = currentTool() === "raids"
-    ? [["all", "全部"], ["stamina", "体力待刷"], ["raid", "副本待打"]]
-    : [["all", "全部"], ["stamina", "体力待刷"]];
-  byId("filters").hidden = !currentServer().accounts.length;
-  byId("filters").replaceChildren(...options.map(([key, label]) => {
-    const control = button(label, "filter-button", { filter: key });
-    control.setAttribute("aria-pressed", String(currentFilter() === key));
-    return control;
-  }));
+  const tool = currentTool();
+  const bar = byId("filters");
+  bar.hidden = !currentServer().accounts.length;
+  if (bar.dataset.filterType !== tool) {
+    const options = tool === "raids"
+      ? [["all", "全部"], ["raid", "仅待打"]]
+      : [["all", "全部"], ["stamina", "仅待刷"]];
+    bar.replaceChildren(...options.map(([key, label]) => button(label, "filter-button", { filter: key })));
+    bar.dataset.filterType = tool;
+  }
+  const selected = currentFilter();
+  for (const control of bar.children) {
+    control.setAttribute("aria-pressed", String(control.dataset.filter === selected));
+  }
 }
 
 function entryData(account, zone, character) {
@@ -423,10 +539,6 @@ function characterIdentity(character) {
   return identity;
 }
 
-function isPendingRaid(raid) {
-  return !raid.doneToday && raid.remaining > 0;
-}
-
 function characterActions(account, zone, character) {
   const actions = [
     entryButton("改名", "rename-character", account, zone, character),
@@ -435,19 +547,30 @@ function characterActions(account, zone, character) {
     actions.push(entryButton("移动区服", "move-character", account, zone, character));
   }
   actions.push(entryButton("删除", "delete-character", account, zone, character));
-  const menu = entryMenu(account, zone, character, ...actions);
-  return currentTool() === "stamina"
-    ? make("div", "character-actions", menu)
-    : make("div", "character-actions", staminaButton(account, zone, character, "体力"), menu);
+  return make("div", "character-actions", entryMenu(account, zone, character, ...actions));
+}
+
+function raidCanRecord(account, character, raid) {
+  return Boolean(raid) && Tracker.raidClearBlockers(account, character, raid).length === 0;
+}
+
+function renderRaidAvailability(entry, account, character, raid) {
+  const blockers = Tracker.raidClearBlockers(account, character, raid);
+  const record = entry.querySelector(".raid-toggle");
+  const notice = entry.querySelector(".raid-blockers");
+  record.disabled = blockers.length > 0;
+  notice.hidden = !blockers.length;
+  notice.textContent = blockers.length ? blockers.map((limit) => RAID_LIMIT_LABELS[limit]).join("、") + "额度已用完" : "";
+  record.title = notice.textContent;
 }
 
 function renderRaid(account, zone, character, raid, defaultMaximum) {
   const maxAttempts = Tracker.raidLimit(defaultMaximum, raid);
   const data = { ...entryData(account, zone, character), raid: raid.name };
   const label = entryName(account, zone, character) + " " + raid.name;
-  const toggle = taskButton(raid.name, "raid-toggle", { ...data, action: "raid" }, raid.doneToday);
-  toggle.disabled = !raid.doneToday && raid.remaining <= 0;
-  toggle.setAttribute("aria-label", label + " 今日已打");
+  const record = button("", "raid-toggle", { ...data, action: "raid" });
+  record.append(make("span", "raid-name", raid.name), make("small", "raid-record-label", "记 1 次"));
+  record.setAttribute("aria-label", label + " 记录通关 1 次");
 
   const input = make("input", "");
   input.type = "number";
@@ -465,10 +588,30 @@ function renderRaid(account, zone, character, raid, defaultMaximum) {
   plus.disabled = raid.remaining >= maxAttempts;
   minus.setAttribute("aria-label", label + " 减少一次剩余次数");
   plus.setAttribute("aria-label", label + " 增加一次剩余次数");
+  minus.title = plus.title = "手工校正角色单本余额";
 
-  return make("div", "raid-row", toggle,
-    make("div", "remaining-field", minus, input, plus, make("span", "", "/ " + maxAttempts))
+  const denominator = state.activeServer === "regular"
+    ? button("/ " + maxAttempts, "role-raid-limit", { ...data, action: "edit-raid-quota" })
+    : make("span", "", "/ " + maxAttempts);
+  if (denominator instanceof HTMLButtonElement) {
+    denominator.title = "设置角色单本额度";
+    denominator.setAttribute("aria-label", label + " 设置单本额度，上限 " + maxAttempts);
+  }
+  const details = make("div", "raid-record-details");
+  const count = Tracker.getRaidClears(raid).length;
+  if (count) {
+    const history = button("今日 " + count + " 次 · 明细", "button button--quiet raid-clears-trigger", { ...data, action: "raid-clears" });
+    history.setAttribute("aria-label", label + " 今日 " + count + " 笔通关记录");
+    history.setAttribute("aria-haspopup", "dialog");
+    details.append(history);
+  }
+  details.append(make("small", "raid-blockers"));
+  const entry = make("div", "raid-entry",
+    make("div", "raid-row", record, make("div", "remaining-field", minus, input, plus, denominator)),
+    details
   );
+  renderRaidAvailability(entry, account, character, raid);
+  return entry;
 }
 
 function renderCharacter(account, zone, character, maxAttempts) {
@@ -477,10 +620,18 @@ function renderCharacter(account, zone, character, maxAttempts) {
   if (currentTool() === "stamina") {
     return make("div", "stamina-row " + tone, staminaButton(account, zone, character, characterIdentity(character)), actions);
   }
-  const raids = currentFilter() === "raid" ? character.raids.filter(isPendingRaid) : character.raids;
+  if (state.activeServer === "regular") {
+    const quota = Tracker.getCharacterRaidQuota(character);
+    const edit = entryButton("角色总奖励", "edit-character-quota", account, zone, character);
+    edit.className = "button button--quiet character-reward-quota";
+    edit.append(quotaValue(quota));
+    edit.setAttribute("aria-label", entryName(account, zone, character) + " 设置角色总奖励额度"
+      + (quota ? "，剩余 " + quota.remaining + " 次，上限 " + quota.maxAttempts : "，未设置"));
+    actions.prepend(edit);
+  }
   return make("div", "character-card " + tone,
     make("div", "character-header", characterIdentity(character), actions),
-    make("div", "raid-list", ...raids.map((raid) => renderRaid(account, zone, character, raid, maxAttempts)))
+    make("div", "raid-list", ...character.raids.map((raid) => renderRaid(account, zone, character, raid, maxAttempts)))
   );
 }
 
@@ -512,13 +663,43 @@ function renderZone(account, zone, characters, maxAttempts) {
 function accountProgress(account, collapsed) {
   const characters = account.zones.flatMap((zone) => zone.characters);
   if (!collapsed) return account.zones.length + " 个区服 · " + characters.length + " 个角色";
-  const stamina = characters.filter((character) => !character.staminaDone).length;
-  const raids = characters.reduce((sum, character) => sum + character.raids.filter(isPendingRaid).length, 0);
-  return "体力待刷 " + stamina + " · 副本待打 " + raids;
+  if (currentTool() === "stamina") {
+    const pending = characters.filter((character) => !character.staminaDone).length;
+    return "体力待刷 " + pending;
+  }
+  const raids = characters.reduce((sum, character) => (
+    sum + character.raids.filter((raid) => raidCanRecord(account, character, raid)).length
+  ), 0);
+  return "副本待打 " + raids;
 }
 
-function renderAccount(account, zones, maxAttempts, index) {
-  const collapsed = preferences[state.activeServer].collapsed.includes(account.id);
+function quotaValue(quota) {
+  const value = make("strong", "account-raid-quota-value", quota ? quota.remaining + " / " + quota.maxAttempts : "未设置");
+  if (quota) {
+    value.title = "剩余 " + quota.remaining + " 次，上限 " + quota.maxAttempts + " 次";
+    value.dataset.empty = String(quota.remaining === 0);
+  }
+  return value;
+}
+
+function accountRaidQuotas(account, server) {
+  const edit = entryButton("设置额度", "edit-raid-quota", account);
+  edit.className = "button button--secondary";
+  const names = new Set([...server.activeRaids, ...account.raidQuota.raids.map(({ name }) => name)]);
+  const items = Array.from(names, (name) => make(
+    "li", "account-raid-quota-item", make("span", "", name), quotaValue(Tracker.getAccountRaidQuota(account, name))
+  ));
+  return make("div", "account-raid-quotas",
+    make("div", "account-raid-quota-head",
+      make("div", "account-raid-quota-total", make("span", "", "账号团本总奖励次数"), quotaValue(Tracker.getAccountRaidQuota(account))),
+      edit
+    ),
+    make("ul", "account-raid-quota-list", ...items)
+  );
+}
+
+function renderAccount(account, zones, maxAttempts, index, searching) {
+  const collapsed = !searching && preferences[state.activeServer].collapsed.includes(account.id);
   const heading = button("", "account-heading account-fold", { ...entryData(account), action: "toggle-account" });
   const contentId = "account-content-" + index;
   const indicator = make("span", "fold-indicator");
@@ -528,11 +709,12 @@ function renderAccount(account, zones, maxAttempts, index) {
     make("span", "account-name-line",
       make("strong", "account-name", account.name)
     ),
-    make("small", "", accountProgress(account, collapsed)),
+    make("small", "account-progress", accountProgress(account, collapsed)),
     indicator
   );
   heading.setAttribute("aria-expanded", String(!collapsed));
   heading.setAttribute("aria-controls", contentId);
+  heading.disabled = Boolean(searching);
   const batch = entryButton("批量记录", "open-batch", account);
   batch.disabled = !account.zones.some((zone) => zone.characters.length);
   const more = [entryButton("改名", "rename-account", account)];
@@ -557,7 +739,11 @@ function renderAccount(account, zones, maxAttempts, index) {
   if (!zones.length) content.append(make("p", "account-note", "添加区服后即可管理角色。"));
   content.id = contentId;
   content.hidden = collapsed;
-  const card = make("article", "account-card account-tone-" + (index % 6), header, content);
+  const card = make("article", "account-card account-tone-" + (index % 6), header);
+  if (state.activeServer === "regular" && currentTool() === "raids") {
+    card.append(accountRaidQuotas(account, currentServer()));
+  }
+  card.append(content);
   card.setAttribute("aria-label", "账号 " + account.name);
   return card;
 }
@@ -565,51 +751,95 @@ function renderAccount(account, zones, maxAttempts, index) {
 function renderAccounts() {
   const server = currentServer();
   const filter = currentFilter();
+  const term = currentSearch();
+  const stamina = currentTool() === "stamina";
+  searchInput.hidden = !server.accounts.length;
+  searchClear.hidden = searchInput.hidden || !searchInput.value;
+  searchClear.disabled = searchClear.hidden;
+  const matches = (name) => searchKey(name).includes(term);
   const cards = [];
+  let matchingCharacters = 0;
   for (const account of server.accounts) {
-    const zones = account.zones.map((zone) => ({
-      zone,
-      characters: zone.characters.filter((character) => {
-        if (filter === "stamina") return !character.staminaDone;
-        if (filter === "raid") return character.raids.some(isPendingRaid);
-        return true;
-      }),
-    })).filter(({ characters }) => filter === "all" || characters.length);
-    if (filter === "all" || zones.length) {
-      cards.push(renderAccount(account, zones, server.maxAttempts, cards.length));
+    const accountMatches = matches(account.name);
+    const zones = account.zones.flatMap((zone) => {
+      const zoneMatches = accountMatches || matches(zone.name);
+      const characters = zone.characters.flatMap((character) => {
+        const roleMatches = zoneMatches || matches(character.name);
+        if (stamina) return roleMatches && (filter !== "stamina" || !character.staminaDone) ? [character] : [];
+        if (roleMatches && filter === "all") return [character];
+        const raids = character.raids.filter((raid) => (roleMatches || matches(raid.name)) &&
+          (filter !== "raid" || raidCanRecord(account, character, raid)));
+        return raids.length ? [{ ...character, raids }] : [];
+      });
+      matchingCharacters += characters.length;
+      return characters.length || (filter === "all" && zoneMatches) ? [{ zone, characters }] : [];
+    });
+    if (zones.length || (filter === "all" && accountMatches)) {
+      cards.push(renderAccount(account, zones, server.maxAttempts, cards.length, Boolean(term)));
     }
   }
   if (!cards.length) {
-    const title = server.accounts.length ? "没有符合筛选条件的角色" : "还没有账号";
-    const hint = server.accounts.length
+    let title = "还没有账号";
+    if (server.accounts.length) {
+      title = characterTotal(server) === 0 ? "还没有角色"
+        : filter === "stamina" ? "没有待刷体力的角色" : "没有待打的副本";
+    }
+    if (term) title = "没有找到匹配的记录";
+    const hint = term ? "换个关键词，或切换到「全部」查看。"
+      : server.accounts.length
       ? "切换到「全部」可查看所有角色。"
       : "添加账号后，按区服管理角色、副本和体力。";
     cards.push(make("div", "empty-state", make("strong", "empty-title", title), make("p", "", hint)));
   }
+  const results = term && !searchInput.hidden ? "匹配 " + matchingCharacters + " 个角色" : "";
+  searchResults.hidden = !results;
+  if (searchResults.textContent !== results) searchResults.textContent = results;
   byId("reset-daily").disabled = !characterTotal(server);
   accountList.replaceChildren(...cards);
 }
 
+function visibleTasks(action) {
+  return Array.from(accountList.querySelectorAll("button[data-action='" + action + "']:not(:disabled)"))
+    .filter((control) => !control.closest("[hidden]"));
+}
+
 function render() {
   const focused = document.activeElement;
+  const taskAction = currentFilter() !== "all" && focused?.matches(".raid-toggle, .stamina-toggle")
+    ? focused.dataset.action : "";
+  const taskIndex = taskAction ? visibleTasks(taskAction).indexOf(focused) : -1;
+  const keyboardTaskFocus = taskIndex >= 0 && focused.matches(":focus-visible");
+  const tool = currentTool();
+  const search = searches.get(state.activeServer) || "";
+  if (!composingSearch && searchInput.value !== search) searchInput.value = search;
+  const searchLabel = tool === "stamina" ? "搜索账号、区服或角色" : "搜索账号、区服、角色或团本";
+  searchInput.placeholder = searchLabel;
+  searchInput.setAttribute("aria-label", searchLabel);
   document.body.dataset.server = state.activeServer;
-  for (const control of document.querySelectorAll("[data-tool]")) {
-    control.setAttribute("aria-pressed", String(control.dataset.tool === currentTool()));
+  document.body.dataset.tool = tool;
+  market?.selectServer(state.activeServer);
+  for (const control of toolButtons) {
+    control.setAttribute("aria-pressed", String(control.dataset.tool === tool));
   }
   for (const control of document.querySelectorAll("[data-select-server]")) {
     control.setAttribute("aria-pressed", String(control.dataset.selectServer === state.activeServer));
   }
   const serverLabel = Tracker.getServerDef(state.activeServer).label;
   byId("workspace-title").textContent = serverLabel;
-  byId("tool-nav").setAttribute("aria-label", serverLabel + "记录工具");
-  byId("workspace-subtitle").textContent = "北京时间 06:00 重置今日标记，剩余次数不会自动恢复";
+  toolNav.setAttribute("aria-label", serverLabel + "记录工具");
+  byId("workspace-subtitle").textContent = tool === "stamina"
+    ? "北京时间 06:00 重置体力完成标记"
+    : "北京时间 06:00 重置今日已打标记，保留副本剩余次数";
+  byId("raid-settings").hidden = tool !== "raids";
   renderStorageStatus();
 
-  renderMetrics();
-  renderSettings();
+  renderOverview();
+  if (tool === "raids") renderSettings();
   renderFilters();
   renderAccounts();
   if (raidCatalogDialog.open) renderRaidCatalog();
+  if (restoreDialog.open) renderRaidRestorePreview();
+  if (raidClearsDialog.open) renderRaidClearsDialog();
 
   if (focused instanceof HTMLSelectElement && !focused.isConnected && focused.dataset.slot !== undefined) {
     const replacement = Array.from(byId("raid-controls").querySelectorAll("select"))
@@ -621,9 +851,14 @@ function render() {
     if (data.length) {
       const replacement = Array.from(document.querySelectorAll("button[data-action], button[data-filter], summary[data-menu]"))
         .find((control) => data.every(([key, value]) => control.dataset[key] === value));
-      const currentFilter = byId("filters").querySelector("[aria-pressed=true]");
-      const next = replacement && !replacement.matches(":disabled") ? replacement : currentFilter;
-      next?.focus({ preventScroll: true });
+      if (replacement && !replacement.matches(":disabled") && !replacement.closest("[hidden]")) {
+        replacement.focus({ preventScroll: true });
+        return;
+      }
+      const tasks = taskIndex < 0 ? [] : visibleTasks(taskAction);
+      const next = tasks[Math.min(taskIndex, tasks.length - 1)];
+      if (next) next.focus({ preventScroll: !keyboardTaskFocus });
+      else byId("filters").querySelector("[aria-pressed=true]")?.focus({ preventScroll: true });
     }
   }
 }
@@ -693,26 +928,44 @@ function records(ref) {
 
 for (const control of document.querySelectorAll("[data-select-server]")) {
   control.addEventListener("click", () => {
-    resetAtBoundary();
-    state.activeServer = control.dataset.selectServer;
-    render();
+    const reset = resetAtBoundary();
+    const server = control.dataset.selectServer;
+    if (server !== state.activeServer) {
+      if (composingSearch) searchInput.blur();
+      composingSearch = false;
+      state.activeServer = server;
+      render();
+    } else if (reset) {
+      render();
+    }
   });
 }
 
-for (const control of document.querySelectorAll("[data-tool]")) {
+for (const control of toolButtons) {
   control.addEventListener("click", () => {
-    resetAtBoundary();
-    changeTool(control.dataset.tool);
-    render();
+    const reset = resetAtBoundary();
+    const tool = control.dataset.tool;
+    if (tool !== currentTool()) {
+      changeTool(tool);
+      render();
+    } else if (reset) {
+      render();
+    }
   });
 }
 
 byId("filters").addEventListener("click", (event) => {
-  const filter = event.target.closest("button[data-filter]");
+  const filter = event.target.closest("button[data-filter]")?.dataset.filter;
   if (!filter) return;
-  resetAtBoundary();
-  changeFilter(filter.dataset.filter);
-  render();
+  const reset = resetAtBoundary();
+  const changed = filter !== currentFilter();
+  if (changed) changeFilter(filter);
+  if (reset) {
+    render();
+  } else if (changed) {
+    renderFilters();
+    renderAccounts();
+  }
 });
 
 byId("raid-controls").addEventListener("click", (event) => {
@@ -865,21 +1118,141 @@ function changeAttempts(delta) {
 byId("increase-attempts").addEventListener("click", () => changeAttempts(1));
 byId("decrease-attempts").addEventListener("click", () => changeAttempts(-1));
 
-byId("restore-raids").addEventListener("click", () => {
-  const serverId = state.activeServer;
-  const label = Tracker.getServerDef(serverId).label;
-  openAction("恢复副本次数", "将" + label + "的副本剩余次数补到当前上限，并清除今日已打标记。",
-    { confirmLabel: "恢复次数" }, () => {
-      editRecord(() => { state.servers[serverId] = Tracker.resetRaidCycle(state.servers[serverId]); }, "副本次数已恢复");
+function raidRestorePlan() {
+  const current = state.servers[restoreServerId];
+  const accountId = byId("raid-restore-account").value;
+  const raidName = byId("raid-restore-raid").value;
+  const restoreTotal = restoreServerId === "regular" && byId("raid-restore-total").checked;
+  const next = Tracker.resetRaidCycle(current, { accountId, raidName, restoreTotal });
+  const changes = [];
+  current.accounts.forEach((account, accountIndex) => {
+    if (accountId && account.id !== accountId) return;
+    const planned = next.accounts[accountIndex];
+    const details = [];
+    const quotas = [null, ...(account.raidQuota?.raids || []).map(({ name }) => name)];
+    for (const name of quotas) {
+      const previous = Tracker.getAccountRaidQuota(account, name);
+      const updated = Tracker.getAccountRaidQuota(planned, name);
+      if (previous && updated && previous.remaining !== updated.remaining) {
+        details.push((name || "账号总奖励") + " " + previous.remaining + " → " + updated.remaining + "/" + updated.maxAttempts);
+      }
+    }
+    const roles = new Map();
+    account.zones.forEach((zone, zoneIndex) => {
+      zone.characters.forEach((character, charIndex) => {
+        const target = planned.zones[zoneIndex].characters[charIndex];
+        const before = Tracker.getCharacterRaidQuota(character);
+        const after = Tracker.getCharacterRaidQuota(target);
+        if (before && after && before.remaining !== after.remaining) {
+          details.push(character.name + "总奖励 " + before.remaining + " → " + after.remaining + "/" + after.maxAttempts);
+        }
+        for (let index = 0; index < character.raids.length; index += 1) {
+          const oldRaid = character.raids[index];
+          const newRaid = target.raids[index];
+          if (oldRaid.remaining !== newRaid.remaining ||
+              JSON.stringify(Tracker.getRaidClears(oldRaid)) !== JSON.stringify(Tracker.getRaidClears(newRaid))) {
+            roles.set(oldRaid.name, (roles.get(oldRaid.name) || 0) + 1);
+          }
+        }
+      });
     });
+    for (const [name, count] of roles) details.push(name + "恢复 " + count + " 个角色");
+    if (details.length) changes.push({ accountName: account.name, details });
+  });
+  return { next, changes };
+}
+
+function renderRaidRestorePreview() {
+  if (!restoreServerId) return;
+  const { changes } = raidRestorePlan();
+  const preview = byId("raid-restore-preview");
+  preview.replaceChildren(...(changes.length ? changes.map(({ accountName, details }) => make(
+    "div", "", make("strong", "", accountName), make("p", "", details.join(" · "))
+  )) : [make("p", "", "所选范围内的次数已满。")]));
+  byId("confirm-raid-restore").disabled = !changes.length || recoveryWriting;
+}
+
+byId("restore-raids").addEventListener("click", () => {
+  resetAtBoundary();
+  restoreServerId = state.activeServer;
+  const server = currentServer();
+  const names = new Set([...server.activeRaids, ...server.accounts.flatMap((account) => (
+    (account.raidQuota?.raids || []).map(({ name }) => name)
+  ))]);
+  setChoices(byId("raid-restore-account"), [["", "全部账号"], ...server.accounts.map(({ id, name }) => [id, name])]);
+  setChoices(byId("raid-restore-raid"), [["", "全部团本"], ...Array.from(names, (name) => [name, name])]);
+  byId("raid-restore-total-field").hidden = restoreServerId !== "regular";
+  byId("raid-restore-total").checked = true;
+  byId("raid-restore-message").hidden = true;
+  renderRaidRestorePreview();
+  restoreDialog.showModal();
+});
+
+byId("raid-restore-account").addEventListener("change", renderRaidRestorePreview);
+byId("raid-restore-total").addEventListener("change", renderRaidRestorePreview);
+byId("raid-restore-raid").addEventListener("change", (event) => {
+  byId("raid-restore-total").checked = !event.target.value;
+  renderRaidRestorePreview();
+});
+byId("close-raid-restore").addEventListener("click", () => restoreDialog.close());
+restoreDialog.addEventListener("cancel", (event) => {
+  if (restoreDialog.getAttribute("aria-busy") === "true") event.preventDefault();
+});
+restoreDialog.addEventListener("close", () => {
+  if (!restoreDialog.open) restoreServerId = null;
+});
+byId("raid-restore-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!restoreServerId || recoveryWriting) return;
+  resetAtBoundary();
+  const id = restoreServerId;
+  const { next, changes } = raidRestorePlan();
+  if (!changes.length) return;
+  const status = byId("raid-restore-message");
+  status.textContent = "正在保存恢复点和变更…";
+  status.hidden = false;
+  restoreDialog.setAttribute("aria-busy", "true");
+  const controls = ["raid-restore-account", "raid-restore-raid", "raid-restore-total", "close-raid-restore"];
+  for (const control of controls) byId(control).disabled = true;
+  byId("confirm-raid-restore").disabled = true;
+  try {
+    const saved = await saveRestorable("恢复副本次数", {
+      ...state,
+      servers: { ...state.servers, [id]: next },
+    });
+    if (!saved) throw new Error("浏览器保存失败，请重试。");
+    restoreDialog.close();
+    render();
+    showToast("已恢复所选范围的副本次数");
+  } catch (error) {
+    status.textContent = error.message;
+    renderRaidRestorePreview();
+  } finally {
+    restoreDialog.removeAttribute("aria-busy");
+    for (const control of controls) byId(control).disabled = false;
+  }
 });
 
 byId("reset-daily").addEventListener("click", () => {
+  closeMenus();
+  byId("open-more").focus({ preventScroll: true });
   const serverId = state.activeServer;
   const label = Tracker.getServerDef(serverId).label;
   openAction("重置今日进度", "清除" + label + "的体力完成和今日已打标记，保留副本剩余次数。",
-    { confirmLabel: "重置进度" }, () => {
-      editRecord(() => { state.servers[serverId] = Tracker.resetDailyProgress(state.servers[serverId]); }, "今日进度已重置");
+    { confirmLabel: "重置进度" }, async () => {
+      resetAtBoundary();
+      const next = Tracker.resetDailyProgress(state.servers[serverId]);
+      try {
+        const saved = await saveRestorable("重置今日进度", {
+          ...state,
+          servers: { ...state.servers, [serverId]: next },
+        });
+        if (!saved) throw new Error("浏览器保存失败，请重试。");
+        render();
+        showToast("今日进度已重置");
+      } catch (error) {
+        showToast(error.message);
+      }
     });
 });
 
@@ -895,7 +1268,7 @@ byId("add-account").addEventListener("click", () => {
       return;
     }
     changeFilter("all");
-    editRecord(() => state.servers[serverId].accounts.push(Tracker.createAccount(name)), "账号已添加");
+    editRecord(() => state.servers[serverId].accounts.push(Tracker.createAccount(name, serverId)), "账号已添加");
   });
 });
 
@@ -911,20 +1284,70 @@ function applyRecordChange(ref, target, after) {
   return { ref, before, after };
 }
 
-function toggleCompletion(ref, record) {
-  const { server, character, raid } = record;
+function recordProgress(ref, record) {
+  const { server, account, character, raid } = record;
   if (ref.raid) {
-    if (!raid || (!raid.doneToday && raid.remaining <= 0)) return;
-    const doneToday = !raid.doneToday;
-    const remaining = doneToday ? raid.remaining - 1 : Math.min(Tracker.raidLimit(server, raid), raid.remaining + 1);
-    const change = applyRecordChange(ref, raid, { doneToday, remaining });
-    recordCompletion([change], doneToday ? "已记录副本完成" : "已取消副本完成标记");
+    if (!raid) return;
+    const clearId = Tracker.recordRaidClear(server, account, character, raid);
+    if (clearId) {
+      recordCompletion([{ ref, clearId }], "已记录 1 次通关");
+    } else {
+      render();
+    }
   } else if (character) {
     const staminaDone = !character.staminaDone;
     const change = applyRecordChange(ref, character, { staminaDone });
     recordCompletion([change], staminaDone ? "已记录体力完成" : "已取消体力完成标记");
   }
 }
+
+function renderRaidClearsDialog() {
+  const { raid, character } = records(raidClearsContext);
+  const clears = raid ? Tracker.getRaidClears(raid) : [];
+  const list = byId("raid-clears-list");
+  const focused = list.contains(document.activeElement) ? document.activeElement.dataset.clearId : "";
+  byId("raid-clears-title").textContent = raid ? raid.name + "通关记录" : "通关记录";
+  byId("raid-clears-summary").textContent = raid
+    ? "角色「" + character.name + "」今日记录 " + clears.length + " 笔。"
+    : "当前记录已更新。";
+  const entries = clears.map(({ id, recordedAt }, index) => {
+    const label = "第 " + (index + 1) + " 笔";
+    const undo = button("撤销", "button button--secondary", { clearId: id });
+    undo.setAttribute("aria-label", "撤销" + label + "通关记录");
+    const time = recordedAt === undefined ? "" : clearTime.format(recordedAt);
+    return make("li", "raid-clear-record", make("div", "",
+      make("strong", "", label), time ? make("small", "", time) : ""
+    ), undo);
+  });
+  list.replaceChildren(...(entries.length ? entries.reverse() : [make("li", "dialog-message", "今日暂无通关记录。")]));
+  if (focused) {
+    const buttons = Array.from(list.querySelectorAll("[data-clear-id]"));
+    (buttons.find((item) => item.dataset.clearId === focused) || buttons[0] || byId("close-raid-clears")).focus();
+  }
+}
+
+function openRaidClears(ref) {
+  raidClearsContext = ref;
+  renderRaidClearsDialog();
+  raidClearsDialog.showModal();
+}
+
+byId("close-raid-clears").addEventListener("click", () => raidClearsDialog.close());
+raidClearsDialog.addEventListener("close", () => { if (!raidClearsDialog.open) raidClearsContext = null; });
+byId("raid-clears-list").addEventListener("click", (event) => {
+  const action = event.target.closest("button[data-clear-id]");
+  if (!action || !raidClearsContext) return;
+  resetAtBoundary();
+  const { server, account, character, raid } = records(raidClearsContext);
+  if (!Tracker.undoRaidClear(server, account, character, raid, action.dataset.clearId)) {
+    render();
+    byId("raid-clears-summary").textContent = "这笔记录已更新，请核对当前列表。";
+    return;
+  }
+  const saved = saveState();
+  render();
+  byId("raid-clears-summary").textContent = saved ? "已撤销这笔通关记录。" : "已撤销，请导出备份。";
+});
 
 function toggleAccountStamina(ref, account) {
   const characters = account.zones.flatMap((zone) => zone.characters.map((character) => ({ zone, character })));
@@ -939,6 +1362,123 @@ function toggleAccountStamina(ref, account) {
 function clampRemaining(value, maximum) {
   return Math.max(0, Math.min(maximum, Math.floor(value)));
 }
+
+function setRoleRemaining(server, raid, value) {
+  const remaining = clampRemaining(value, Tracker.raidLimit(server, raid));
+  if (remaining === raid.remaining) return;
+  raid.remaining = remaining;
+  Tracker.clearRaidCharge(raid);
+}
+
+function quotaEditRow(name, label, quota, fallback = "") {
+  const row = make("div", "quota-edit-row", make("strong", "", label));
+  row.dataset.raidName = name ?? "";
+  for (const [field, title, minimum] of [["remaining", "剩余次数", 0], ["maxAttempts", "上限", 1]]) {
+    const input = make("input", "");
+    input.type = "number";
+    input.step = "1";
+    input.inputMode = "numeric";
+    input.min = String(minimum);
+    input.max = String(Number.MAX_SAFE_INTEGER);
+    input.dataset.quotaField = field;
+    input.defaultValue = quota?.[field] === undefined ? "" : String(quota[field]);
+    if (field === "maxAttempts") input.placeholder = fallback;
+    input.setAttribute("aria-label", label + " " + title);
+    row.append(make("label", "dialog-field", make("span", "", title), input));
+  }
+  return row;
+}
+
+function openRaidQuota(ref, { server, account, character, raid }) {
+  const characterTotal = ref.action === "edit-character-quota";
+  if (server.serverId !== "regular" || (ref.raid && !raid) || (characterTotal && !character)) return;
+  quotaContext = ref;
+  byId("raid-quota-error").hidden = true;
+  let title;
+  let description;
+  let rows;
+  if (characterTotal) {
+    title = "角色总奖励额度";
+    description = "角色「" + character.name + "」的所有团本共享这项额度。只填上限按满额保存。两项留空可取消。";
+    rows = [quotaEditRow("character-total", "角色总奖励次数", Tracker.getCharacterRaidQuota(character), "例如 30")];
+  } else if (raid) {
+    title = "角色单本额度";
+    description = "角色「" + character.name + "」。上限留空时使用常规服的角色单本默认上限。";
+    rows = [quotaEditRow(raid.name, raid.name, raid, String(Tracker.raidLimit(server)))];
+  } else {
+    title = "账号团本额度";
+    description = "账号「" + account.name + "」。只填上限时按满额保存。单团本两项留空可取消该项额度。";
+    rows = [
+      quotaEditRow(null, "团本总奖励次数", Tracker.getAccountRaidQuota(account)),
+      ...Tracker.getRaidCatalog(server).map(({ name }) => quotaEditRow(name, name, Tracker.getAccountRaidQuota(account, name))),
+    ];
+  }
+  byId("raid-quota-title").textContent = title;
+  byId("raid-quota-description").textContent = description;
+  byId("raid-quota-fields").replaceChildren(...rows);
+  raidQuotaDialog.showModal();
+}
+
+function readQuotaRow(row, defaultMaximum) {
+  const remainingField = row.querySelector("[data-quota-field='remaining']");
+  const maximumField = row.querySelector("[data-quota-field='maxAttempts']");
+  if (remainingField.value === remainingField.defaultValue && maximumField.value === maximumField.defaultValue) return null;
+  const name = row.dataset.raidName || null;
+  if (defaultMaximum === undefined && name && !remainingField.value && !maximumField.value) return { name, quota: null };
+  const override = maximumField.value ? maximumField.valueAsNumber : undefined;
+  const maxAttempts = override ?? defaultMaximum;
+  const remaining = remainingField.value ? remainingField.valueAsNumber : maxAttempts;
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1 ||
+      !Number.isSafeInteger(remaining) || remaining < 0 || remaining > maxAttempts) {
+    throw new Error("「" + row.querySelector("strong").textContent + "」请填写正整数上限，剩余次数须在 0 到上限之间。");
+  }
+  return { name, quota: { maxAttempts, remaining }, override };
+}
+
+byId("close-raid-quota").addEventListener("click", () => raidQuotaDialog.close());
+raidQuotaDialog.addEventListener("close", () => {
+  if (!raidQuotaDialog.open) quotaContext = null;
+});
+byId("raid-quota-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!quotaContext) return;
+  resetAtBoundary();
+  const { server, account, character, raid } = records(quotaContext);
+  const characterTotal = quotaContext.action === "edit-character-quota";
+  const error = byId("raid-quota-error");
+  try {
+    if (!account || (quotaContext.raid && !raid) || (characterTotal && !character)) {
+      throw new Error("这条记录已更新，请重新打开额度设置。");
+    }
+    const rows = Array.from(byId("raid-quota-fields").children);
+    const updates = rows.map((row) => readQuotaRow(row, raid ? Tracker.raidLimit(server) : undefined)).filter(Boolean);
+    if (!updates.length) {
+      raidQuotaDialog.close();
+      return;
+    }
+    if (characterTotal) {
+      Tracker.setCharacterRaidQuota(character, updates[0].quota);
+    } else if (raid) {
+      const [{ quota, override }] = updates;
+      if (override === undefined) delete raid.maxAttempts;
+      else raid.maxAttempts = override;
+      setRoleRemaining(server, raid, quota.remaining);
+    } else {
+      const catalog = new Set(Tracker.getRaidCatalog(server).map(({ name }) => name));
+      if (updates.some(({ name }) => name && !catalog.has(name))) {
+        throw new Error("副本目录已更新，请重新打开额度设置。");
+      }
+      for (const { name, quota } of updates) Tracker.setAccountRaidQuota(account, name, quota);
+    }
+    const saved = saveState();
+    raidQuotaDialog.close();
+    render();
+    showToast(saved ? "团本额度已保存" : "团本额度已更新，请导出备份");
+  } catch (failure) {
+    error.textContent = failure.message;
+    error.hidden = false;
+  }
+});
 
 function sameZoneName(account, name, exceptId) {
   const key = name.trim().toLocaleLowerCase();
@@ -1075,6 +1615,27 @@ byId("open-more").addEventListener("click", () => {
   }
 });
 
+byId("open-font-settings").addEventListener("click", () => {
+  closeMenus();
+  fontDialog.querySelector(".font-preview-title").textContent = byId("workspace-title").textContent;
+  fontDialog.showModal();
+  fontDialog.querySelector(":checked")?.focus();
+});
+
+fontDialog.addEventListener("change", (event) => {
+  const choice = event.target;
+  if (!choice.matches('input[name="font-preset"]') || !FONT_PRESETS.has(choice.value)) return;
+  applyFontPreset(choice.value);
+  try {
+    localStorage.setItem(FONT_KEY, choice.value);
+    fontNote.textContent = defaultFontNote;
+  } catch {
+    fontNote.textContent = "字体已应用到当前页面，浏览器存储不可用。";
+  }
+});
+
+fontDialog.addEventListener("close", () => byId("open-more").focus({ preventScroll: true }));
+
 document.addEventListener("click", (event) => {
   const keep = event.target.closest(".more-wrap") ? byId("more-menu") : event.target.closest(".entry-menu[open]");
   closeMenus(keep);
@@ -1102,7 +1663,7 @@ accountList.addEventListener("click", (event) => {
     menu.open = false;
     menu.querySelector("summary").focus({ preventScroll: true });
   }
-  resetAtBoundary();
+  const reset = resetAtBoundary();
   const ref = { ...control.dataset, server: state.activeServer };
   const record = records(ref);
   if (!record.account) return;
@@ -1110,7 +1671,7 @@ accountList.addEventListener("click", (event) => {
   switch (ref.action) {
     case "stamina":
     case "raid":
-      toggleCompletion(ref, record);
+      recordProgress(ref, record);
       break;
     case "stamina-all":
       toggleAccountStamina(ref, record.account);
@@ -1121,14 +1682,30 @@ accountList.addEventListener("click", (event) => {
         const { server, raid } = records(ref);
         if (raid) {
           const delta = ref.action === "remaining-plus" ? 1 : -1;
-          raid.remaining = clampRemaining(raid.remaining + delta, Tracker.raidLimit(server, raid));
+          setRoleRemaining(server, raid, raid.remaining + delta);
         }
       });
       break;
-    case "toggle-account":
-      setCollapsed(ref.account, control.getAttribute("aria-expanded") === "true");
-      render();
+    case "edit-raid-quota":
+    case "edit-character-quota":
+      openRaidQuota(ref, record);
       break;
+    case "raid-clears":
+      if (reset) render();
+      openRaidClears(ref);
+      break;
+    case "toggle-account": {
+      const collapsed = control.getAttribute("aria-expanded") === "true";
+      setCollapsed(ref.account, collapsed);
+      if (reset) {
+        render();
+      } else {
+        control.setAttribute("aria-expanded", String(!collapsed));
+        control.querySelector(".account-progress").textContent = accountProgress(record.account, collapsed);
+        byId(control.getAttribute("aria-controls")).hidden = collapsed;
+      }
+      break;
+    }
     case "open-batch":
       openBatch(ref, record);
       break;
@@ -1158,10 +1735,10 @@ accountList.addEventListener("change", (event) => {
   const input = event.target.closest("input[data-field='remaining']");
   if (!input) return;
   const reset = resetAtBoundary();
-  const { raid, server } = records({ ...input.dataset, server: state.activeServer });
+  const { raid, server, account, character } = records({ ...input.dataset, server: state.activeServer });
   if (!raid) return;
   if (Number.isFinite(input.valueAsNumber)) {
-    raid.remaining = clampRemaining(input.valueAsNumber, Tracker.raidLimit(server, raid));
+    setRoleRemaining(server, raid, input.valueAsNumber);
     saveState();
   }
   input.value = String(raid.remaining);
@@ -1169,11 +1746,16 @@ accountList.addEventListener("change", (event) => {
     render();
     return;
   }
+  if (currentFilter() === "raid" && !raidCanRecord(account, character, raid)) {
+    renderOverview();
+    renderAccounts();
+    return;
+  }
   const row = input.closest(".raid-row");
-  row.querySelector(".raid-toggle").disabled = !raid.doneToday && raid.remaining <= 0;
+  renderRaidAvailability(input.closest(".raid-entry"), account, character, raid);
   row.querySelector("[data-action='remaining-minus']").disabled = raid.remaining <= 0;
   row.querySelector("[data-action='remaining-plus']").disabled = raid.remaining >= Tracker.raidLimit(server, raid);
-  renderMetrics();
+  renderOverview();
 });
 
 function setChoices(select, choices) {
@@ -1187,9 +1769,11 @@ function setChoices(select, choices) {
 function openBatch(ref, { account, server }) {
   batchContext = { account: ref.account, server: ref.server };
   byId("batch-account").textContent = "账号「" + account.name + "」";
-  const select = byId("batch-kind");
-  setChoices(select, [["stamina", "每日体力"], ...server.activeRaids.map((name) => ["raid:" + name, name])]);
-  if (currentTool() === "raids" && server.activeRaids.length) select.value = "raid:" + server.activeRaids[0];
+  const stamina = currentTool() === "stamina";
+  byId("batch-title").textContent = stamina ? "批量记录体力" : "批量记录副本";
+  byId("batch-kind-field").hidden = stamina;
+  const choices = stamina ? [["stamina", "每日体力"]] : server.activeRaids.map((name) => ["raid:" + name, name]);
+  setChoices(byId("batch-kind"), choices);
   renderBatchOptions();
   batchDialog.showModal();
 }
@@ -1203,16 +1787,27 @@ function batchInputs() {
   return Array.from(byId("batch-options").querySelectorAll("input[type='checkbox']"));
 }
 
+function batchRaidCapacity() {
+  const raid = selectedBatchRaid();
+  if (!batchContext || !raid) return Infinity;
+  const { account } = records(batchContext);
+  return Math.min(
+    Tracker.getAccountRaidQuota(account)?.remaining ?? Infinity,
+    Tracker.getAccountRaidQuota(account, raid)?.remaining ?? Infinity
+  );
+}
+
 function updateBatchSelection() {
   const inputs = batchInputs();
   const count = inputs.filter((input) => input.checked).length;
+  const limit = Math.min(inputs.length, batchRaidCapacity());
   const selectAll = byId("batch-select-all");
-  selectAll.disabled = !inputs.length;
-  selectAll.textContent = inputs.length && count === inputs.length ? "取消全选" : "全选";
-  byId("batch-selection").textContent = "已选 " + count + " 个角色";
+  selectAll.disabled = limit === 0 && count === 0;
+  selectAll.textContent = count && count >= limit ? "取消全选" : limit < inputs.length ? "选到额度上限" : "全选";
+  byId("batch-selection").textContent = "已选 " + count + " 个角色" + (limit < inputs.length ? " · 最多可记录 " + limit + " 个" : "");
   const confirm = byId("batch-confirm");
-  confirm.disabled = !count;
-  confirm.textContent = "完成 " + count + " 个角色";
+  confirm.disabled = !count || count > limit;
+  confirm.textContent = selectedBatchRaid() ? count + " 个角色各记 1 次" : "完成 " + count + " 个角色";
 }
 
 function renderBatchOptions() {
@@ -1224,7 +1819,7 @@ function renderBatchOptions() {
     const group = make("fieldset", "batch-group", make("legend", "", zone.name));
     for (const character of zone.characters) {
       const raid = raidName ? character.raids.find((entry) => entry.name === raidName) : null;
-      if (raidName ? !raid || !isPendingRaid(raid) : character.staminaDone) continue;
+      if (raidName ? !raidCanRecord(account, character, raid) : character.staminaDone) continue;
       const input = make("input", "");
       input.type = "checkbox";
       Object.assign(input.dataset, { zone: zone.id, character: character.id });
@@ -1242,8 +1837,18 @@ byId("batch-kind").addEventListener("change", renderBatchOptions);
 byId("batch-options").addEventListener("change", updateBatchSelection);
 byId("batch-select-all").addEventListener("click", () => {
   const inputs = batchInputs();
-  const select = inputs.some((input) => !input.checked);
-  for (const input of inputs) input.checked = select;
+  const limit = Math.min(inputs.length, batchRaidCapacity());
+  let count = inputs.filter((input) => input.checked).length;
+  if (count >= limit) {
+    for (const input of inputs) input.checked = false;
+  } else {
+    for (const input of inputs) {
+      if (count >= limit) break;
+      if (input.checked) continue;
+      input.checked = true;
+      count += 1;
+    }
+  }
   updateBatchSelection();
 });
 byId("close-batch").addEventListener("click", () => batchDialog.close());
@@ -1254,13 +1859,18 @@ byId("batch-form").addEventListener("submit", (event) => {
   if (!batchContext) return;
   resetAtBoundary();
   const raidName = selectedBatchRaid();
+  const selected = batchInputs().filter((input) => input.checked);
+  if (selected.length > batchRaidCapacity()) {
+    updateBatchSelection();
+    return;
+  }
   const changes = [];
-  for (const input of batchInputs()) {
-    if (!input.checked) continue;
+  for (const input of selected) {
     const ref = { ...batchContext, ...input.dataset, raid: raidName };
     const target = records(ref);
-    if (raidName && target.raid && isPendingRaid(target.raid)) {
-      changes.push(applyRecordChange(ref, target.raid, { remaining: target.raid.remaining - 1, doneToday: true }));
+    if (raidName && target.raid) {
+      const clearId = Tracker.recordRaidClear(target.server, target.account, target.character, target.raid);
+      if (clearId) changes.push({ ref, clearId });
     } else if (!raidName && target.character && !target.character.staminaDone) {
       changes.push(applyRecordChange(ref, target.character, { staminaDone: true }));
     }
@@ -1279,6 +1889,89 @@ function backupText() {
   return JSON.stringify(Tracker.formatBackup(state));
 }
 
+function recoveryPlan(point, preference) {
+  const clock = new Date();
+  const ids = Object.keys(point.before.servers);
+  const align = (value) => scopedSnapshot(Tracker.ensureDailyReset(value, clock).state, ids);
+  const current = align(state);
+  const { data, conflicts } = window.JingheSyncMerge.merge(align(point.after), align(point.before), current, preference);
+  const next = { ...state, servers: { ...state.servers, ...data.servers } };
+  return { next, conflicts };
+}
+
+function openRecoveryPoint(point) {
+  if (recoveryWriting) return;
+  resetAtBoundary();
+  const base = Tracker.snapshotApp(state);
+  const { next, conflicts } = recoveryPlan(point, "remote");
+  const message = byId("recovery-message");
+  if (!conflicts.length && !changedServers(base, Tracker.snapshotApp(next)).length) {
+    message.textContent = "当前记录已包含这次恢复结果。";
+    return;
+  }
+  const options = { confirmLabel: "确认回退" };
+  let description = "回退「" + point.label + "」造成的变更。";
+  if (conflicts.length) {
+    description += "其中 " + conflicts.length + " 项后来又有修改。";
+    options.choiceLabel = "重叠项如何处理";
+    options.choices = [["remote", "保留后来修改的值"], ["local", "采用恢复点的值"]];
+  }
+  openAction("确认回退", description, options, async (_name, preference) => {
+    resetAtBoundary();
+    try {
+      if (state.dailyDate !== base.dailyDate || changedServers(base, Tracker.snapshotApp(state)).length) {
+        throw new Error("记录刚刚更新，请重新选择恢复点。");
+      }
+      const planned = recoveryPlan(point, preference === "local" ? "local" : "remote");
+      if (!changedServers(base, Tracker.snapshotApp(planned.next)).length) {
+        message.textContent = "没有需要回退的记录。";
+        return;
+      }
+      if (!await saveRestorable("回退恢复点", planned.next)) throw new Error("浏览器保存失败，请重试。");
+      render();
+      await renderRecoveryPoints();
+      message.textContent = "已回退所选恢复点。";
+      showToast("已回退所选恢复点");
+    } catch (error) {
+      message.textContent = error.message;
+    }
+  });
+}
+
+const recoveryTime = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai", dateStyle: "short", timeStyle: "short",
+});
+
+async function renderRecoveryPoints() {
+  const list = byId("recovery-list");
+  const message = byId("recovery-message");
+  message.textContent = "正在读取恢复点…";
+  list.replaceChildren();
+  try {
+    const points = await window.JingheRecovery.list();
+    if (!recoveryDialog.open) return;
+    message.textContent = points.length ? "" : "这里还没有恢复点。";
+    list.replaceChildren(...points.reverse().map((point) => {
+      const names = Object.keys(point.before.servers).map((id) => Tracker.getServerDef(id).label);
+      const meta = make("small", "", names.join("、") + " · " + recoveryTime.format(point.createdAt));
+      const control = button("回退", "button button--secondary");
+      control.setAttribute("aria-label", "回退" + point.label);
+      control.addEventListener("click", () => openRecoveryPoint(point));
+      return make("div", "recovery-item", make("div", "", make("strong", "", point.label), meta), control);
+    }));
+  } catch {
+    message.textContent = "当前浏览器无法读取恢复点。";
+  }
+}
+
+byId("open-recovery").addEventListener("click", () => {
+  closeMenus();
+  byId("open-more").focus({ preventScroll: true });
+  recoveryDialog.showModal();
+  void renderRecoveryPoints();
+});
+byId("close-recovery").addEventListener("click", () => recoveryDialog.close());
+
 function backupMessage(message) {
   const element = byId("backup-message");
   element.hidden = !message;
@@ -1292,7 +1985,7 @@ byId("open-backup").addEventListener("click", () => {
   backupDialog.showModal();
 });
 byId("close-backup").addEventListener("click", () => backupDialog.close());
-byId("download-backup").addEventListener("click", () => {
+function downloadBackup() {
   const blob = new Blob([backupText()], { type: "application/json;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = make("a", "");
@@ -1302,8 +1995,13 @@ byId("download-backup").addEventListener("click", () => {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+byId("download-backup").addEventListener("click", () => {
+  downloadBackup();
   backupMessage("备份文件已生成");
 });
+byId("sync-backup-local").addEventListener("click", downloadBackup);
 byId("copy-backup").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(backupText());
@@ -1357,23 +2055,22 @@ function importBackup(replace) {
   const message = details + (replace ? "当前对应数据会被替换。" : "保留已有进度，补充缺少的账号、区服和角色。");
   openAction(replace ? "覆盖导入" : "合并导入", message, {
     confirmLabel: "确认导入", danger: replace,
-  }, () => {
+  }, async () => {
     resetAtBoundary();
     const activeServer = state.activeServer;
     try {
       const result = replace ? null : Tracker.mergeBackup(state, backup);
       const imported = replace ? Tracker.replaceBackup(state, backup) : result.app;
       imported.activeServer = activeServer;
-      state = imported;
-      if (replace) storageReadError = false;
+      const saved = await saveRestorable(replace ? "覆盖导入备份" : "合并导入备份", imported, replace);
+      if (!saved) throw new Error("浏览器保存失败，请重试。");
       changeFilter("all");
-      const saved = saveState();
       render();
       backupInput.value = "";
       const summary = result
         ? "新增 " + result.addedAccounts + " 个账号、" + result.addedZones + " 个区服、" + result.addedCharacters + " 个角色"
         : "备份已导入";
-      backupMessage(saved ? summary : summary + "，浏览器保存失败，请导出备份。");
+      backupMessage(summary);
     } catch (error) {
       backupMessage(error.message);
     }
@@ -1384,13 +2081,16 @@ byId("replace-backup").addEventListener("click", () => importBackup(true));
 byId("merge-backup").addEventListener("click", () => importBackup(false));
 
 window.addEventListener("storage", (event) => {
-  if (event.storageArea !== localStorage || (event.key !== STORAGE_KEY && event.key !== null)) return;
+  if (event.storageArea !== localStorage) return;
+  if (event.key === FONT_KEY || event.key === null) restoreFontPreset();
+  if (event.key !== STORAGE_KEY || event.newValue === null) return;
   const activeServer = state.activeServer;
   storageNotice = "已保存到此浏览器";
   state = readState();
   state.activeServer = activeServer;
-  resetAtBoundary();
+  resetAtBoundary(false);
   render();
+  deviceSync?.localChanged();
 });
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) updateDay();
@@ -1398,20 +2098,42 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("focus", updateDay);
 setInterval(updateDay, 30000);
 
+restoreFontPreset();
 resetAtBoundary();
 if (needsMigration) saveState();
 render();
+
+deviceSync = window.JingheSync.mount({
+  getSnapshot() {
+    if (storageReadError) return null;
+    const { dailyDate, dailyResetHour, servers } = Tracker.snapshotApp(state);
+    return { dailyDate, dailyResetHour, servers };
+  },
+  applySnapshot(data) {
+    const previous = state;
+    state = Tracker.ensureDailyReset({ ...data, activeServer: previous.activeServer }, new Date()).state;
+    if (!saveState(false)) {
+      state = previous;
+      return false;
+    }
+    render();
+    return true;
+  },
+});
 
 window.JingheRosterImport.mount({
   tracker: Tracker,
   getServer: currentServer,
   refreshDay: resetAtBoundary,
-  commit(server) {
-    state.servers[state.activeServer] = server;
+  async commit(server) {
+    const saved = await saveRestorable("截图或名单导入", {
+      ...state,
+      servers: { ...state.servers, [server.serverId]: server },
+    });
+    if (!saved) return false;
     changeFilter("all");
-    const saved = saveState();
     render();
-    return saved;
+    return true;
   },
   notice: showToast,
 });

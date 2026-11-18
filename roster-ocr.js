@@ -86,25 +86,26 @@
     return { left, top, width: right - left, height: bottom - top };
   }
 
-  function cropForRecognition(image, rectangle, scale, lightText, threshold) {
+  function cropForRecognition(image, rectangle, scale, textTone, threshold) {
     const { left, top, width, height } = rectangle;
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(width * scale));
     canvas.height = Math.max(1, Math.round(height * scale));
-    const context = canvas.getContext("2d", { willReadFrequently: lightText });
+    const context = canvas.getContext("2d", { willReadFrequently: Boolean(textTone) });
     if (!context) throw new Error("无法裁切截图。");
     context.imageSmoothingQuality = "high";
-    context.fillStyle = lightText ? "#000" : "#fff";
+    context.fillStyle = textTone === "light" ? "#000" : "#fff";
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.drawImage(image.source, left, top, width, height, 0, 0, canvas.width, canvas.height);
 
-    if (lightText) {
+    if (textTone) {
       const limit = Number.isFinite(threshold) ? Math.min(255, Math.max(0, threshold)) : 165;
       const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
       const pixels = imageData.data;
       for (let offset = 0; offset < pixels.length; offset += 4) {
         const brightness = (pixels[offset] * 299 + pixels[offset + 1] * 587 + pixels[offset + 2] * 114) / 1000;
-        const value = brightness >= limit ? 0 : 255;
+        const isText = textTone === "light" ? brightness >= limit : brightness <= limit;
+        const value = isText ? 0 : 255;
         pixels[offset] = value;
         pixels[offset + 1] = value;
         pixels[offset + 2] = value;
@@ -195,14 +196,14 @@
         const whitelist = String(region?.whitelist ?? options.whitelist ?? "");
         await run(worker.setParameters({ tessedit_pageseg_mode: mode, tessedit_char_whitelist: whitelist }));
         const scale = Number.isFinite(region?.scale) ? Math.min(3, Math.max(1, region.scale)) : 1;
-        const lightText = region?.lightText === true;
-        const shouldCrop = rectangle && (scale > 1 || lightText);
+        const textTone = region?.lightText ? "light" : region?.darkText ? "dark" : "";
+        const shouldCrop = rectangle && (scale > 1 || textTone);
         const recognitionImage = shouldCrop
-          ? await run(cropForRecognition(image, rectangle, scale, lightText, region.threshold))
+          ? await run(cropForRecognition(image, rectangle, scale, textTone, region.threshold))
           : file;
         const recognitionOptions = rectangle && !shouldCrop ? { rectangle } : {};
         const { data } = await run(worker.recognize(recognitionImage, recognitionOptions));
-        results.push({ text: data.text, region });
+        results.push({ text: data.text, confidence: data.confidence, region });
         regionIndex += 1;
         report(0.65 + 0.34 * regionIndex / tasks.length);
       }

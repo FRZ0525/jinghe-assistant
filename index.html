@@ -3,81 +3,110 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#7b67ca">
+  <meta name="theme-color" content="#fcf8f4">
   <meta name="description" content="记录晶核常规服和赛季服的副本次数与每日体力。">
   <title>晶核助手</title>
   <link rel="icon" href="./assets/app-icon.png">
-  <link rel="stylesheet" href="./styles.css?v=5cfdbd083ca9">
-  <script src="./tracker.js?v=36c107966e14" defer></script>
-  <script src="./roster-ocr.js?v=e3010aa2e6b0" defer></script>
-  <script src="./roster-layout.js?v=31abbfd7d131" defer></script>
-  <script src="./roster-import.js?v=2c25c66ed2a0" defer></script>
-  <script src="./app.js?v=52dab0064a81" defer></script>
+  <link rel="stylesheet" href="./assets/fonts/fonts.css?v=242dfb3fb40b">
+  <link rel="stylesheet" href="./styles.css?v=b227f679b64b">
+  <script src="./tracker.js?v=06eb683647c5" defer></script>
+  <script src="./roster-ocr.js?v=bd277686fe84" defer></script>
+  <script src="./roster-layout.js?v=86055fdc4f81" defer></script>
+  <script src="./roster-import.js?v=4a8e90435568" defer></script>
+  <script src="./sync-merge.js?v=202cf5b5b7f0" defer></script>
+  <script src="./sync-client.js?v=a1e884c9d4ac" defer></script>
+  <script src="./market-client.js?v=4e48d8fdff3e" defer></script>
+  <script src="./recovery.js?v=71e2038f114a" defer></script>
+  <script src="./app.js?v=2bf9da625070" defer></script>
 </head>
 <body data-server="regular">
   <div class="app-shell">
     <header class="topbar">
-      <div class="hero-sparkles" aria-hidden="true">
-        <span>✦</span><span>♡</span>
-      </div>
       <div class="topbar-inner">
         <div class="brand">
           <img class="brand-icon" src="./assets/app-icon.png" alt="" width="52" height="52">
-          <div class="brand-copy">
-            <div class="eyebrow"><span class="eyebrow-line"></span>JINGHE RECORD</div>
-            <span class="brand-name">晶核助手</span>
-          </div>
+          <span class="brand-name">晶核助手</span>
         </div>
         <nav class="server-switch" id="server-nav" aria-label="服务器">
           <button class="server-option" type="button" data-select-server="regular" aria-pressed="true">
+            <span class="server-icon" aria-hidden="true">✦</span>
             <span class="server-option-text"><strong>常规服</strong><small id="regular-summary"></small></span>
           </button>
           <button class="server-option" type="button" data-select-server="season" aria-pressed="false">
+            <span class="server-icon" aria-hidden="true">✿</span>
             <span class="server-option-text"><strong>赛季服</strong><small id="season-summary"></small></span>
           </button>
         </nav>
-        <div class="more-wrap">
-          <button class="nav-button" type="button" id="open-more" aria-expanded="false" aria-controls="more-menu" aria-haspopup="true">更多</button>
-          <div class="menu" id="more-menu" hidden role="menu">
-            <button class="menu-item" type="button" id="open-backup" role="menuitem">数据备份</button>
-            <button class="menu-item" type="button" id="jump-to-settings" role="menuitem">打开设置</button>
+        <div class="header-actions">
+          <button class="save-status sync-trigger" id="open-sync" type="button" aria-haspopup="dialog" aria-controls="sync-dialog" aria-label="打开设备同步">
+            <span id="sync-badge" role="status">设备同步</span>
+          </button>
+          <div class="more-wrap">
+            <button class="nav-button" type="button" id="open-more" aria-expanded="false" aria-controls="more-menu" aria-haspopup="true">更多<span class="nav-chevron" aria-hidden="true"></span></button>
+            <div class="menu" id="more-menu" hidden role="menu">
+              <button class="menu-item" type="button" id="open-font-settings" role="menuitem" aria-haspopup="dialog" aria-controls="font-settings-dialog">字体设置</button>
+              <button class="menu-item" type="button" id="open-backup" role="menuitem">数据备份</button>
+              <button class="menu-item" type="button" id="open-recovery" role="menuitem">恢复点</button>
+              <button class="menu-item" type="button" id="jump-to-settings" role="menuitem">副本设置</button>
+              <button class="menu-item" type="button" id="reset-daily" role="menuitem" disabled>重置今日进度</button>
+            </div>
           </div>
         </div>
       </div>
     </header>
 
     <main class="workspace">
-      <section class="today-strip" aria-labelledby="workspace-title">
-        <header class="today-header">
-          <div>
+      <div class="dashboard-overview">
+        <section class="today-strip" aria-labelledby="workspace-title">
+          <header class="today-header">
             <h1 id="workspace-title">常规服</h1>
-            <p class="today-subtitle" id="workspace-subtitle">北京时间 06:00 重置今日标记，剩余次数不会自动恢复</p>
             <p class="roster-meta" id="roster-meta"></p>
+            <p class="today-subtitle" id="workspace-subtitle">北京时间 06:00 重置今日标记，剩余次数不会自动恢复</p>
+          </header>
+          <img class="today-mascot" src="./assets/crystal-fox.webp?v=859ca80b51cb" alt="" width="512" height="358" decoding="async">
+          <nav class="tool-nav" id="tool-nav" aria-label="常规服记录工具">
+            <button class="tool-button" type="button" data-tool="raids" aria-pressed="true">
+              <span class="nav-icon" aria-hidden="true">✧</span>
+              <span class="tool-copy"><strong>副本次数</strong><small id="tool-raid-summary"></small></span>
+            </button>
+            <button class="tool-button" type="button" data-tool="stamina" aria-pressed="false">
+              <span class="nav-icon" aria-hidden="true">ϟ</span>
+              <span class="tool-copy"><strong>每日体力</strong><small id="tool-stamina-summary"></small></span>
+            </button>
+          </nav>
+        </section>
+        <section class="market-quote" aria-labelledby="market-title">
+          <div class="market-heading">
+            <h2><span class="market-coin" aria-hidden="true">✦</span><span id="market-title">今日铸纹币比例</span></h2>
+            <a id="market-source" href="https://www.hk1686.com/wares/?gameId=151&amp;goodsTypeId=51" target="_blank" rel="noopener noreferrer">铠甲兽挂单 ↗</a>
           </div>
-          <span class="save-status" id="storage-status" role="status">正在读取浏览器数据</span>
-        </header>
-        <nav class="tool-nav" id="tool-nav" aria-label="常规服记录工具">
-          <button class="tool-button" type="button" data-tool="raids" aria-pressed="true">
-            <span class="nav-icon nav-icon--raid" aria-hidden="true">◈</span>副本次数
-          </button>
-          <button class="tool-button" type="button" data-tool="stamina" aria-pressed="false">
-            <span class="nav-icon nav-icon--stamina" aria-hidden="true">✓</span>每日体力
-          </button>
-        </nav>
-        <div class="metrics-grid" id="metrics" aria-label="今日概况"></div>
-      </section>
+          <div class="market-result" id="market-result" hidden>
+            <p class="market-ratio" id="market-unit-ratio"></p>
+            <p class="market-ratio" id="market-ratio"></p>
+          </div>
+          <div class="market-feedback">
+            <p id="market-status" role="status">正在获取报价…</p>
+            <button class="button button--quiet" type="button" id="market-retry" hidden>刷新报价</button>
+          </div>
+        </section>
+      </div>
 
       <div class="work-grid">
         <section class="accounts-region" aria-labelledby="accounts-title">
           <div class="section-heading">
-            <div class="section-title"><h2 id="accounts-title" tabindex="-1">账号与角色</h2></div>
+            <div class="section-title"><h2 id="accounts-title">账号与角色</h2></div>
             <div class="action-group">
               <button class="button button--secondary" type="button" id="open-roster-import" aria-haspopup="dialog" aria-controls="roster-import-dialog">批量录入</button>
-              <button class="button button--primary" type="button" id="add-account">+ 添加账号</button>
+              <button class="button button--primary" type="button" id="add-account"><span class="add-icon" aria-hidden="true">+</span>添加账号</button>
             </div>
           </div>
           <div class="work-toolbar">
+            <div class="role-search-wrap">
+              <input class="role-search" id="role-search" type="search" autocomplete="off" maxlength="80" aria-label="搜索账号、区服、角色或团本" placeholder="搜索账号、区服、角色或团本">
+              <button class="search-clear" id="clear-role-search" type="button" aria-label="清除搜索" hidden>×</button>
+            </div>
             <div class="filter-bar" id="filters" aria-label="筛选角色"></div>
+            <p class="search-results" id="search-results" role="status" hidden></p>
           </div>
           <div class="account-list" id="account-list"></div>
         </section>
@@ -85,7 +114,7 @@
         <section class="panel" id="raid-settings" aria-labelledby="raid-settings-title">
           <div class="section-heading">
             <div class="section-title">
-              <h2 id="raid-settings-title">设置</h2>
+              <h2 id="raid-settings-title">副本设置</h2>
               <p id="raid-settings-note">选择需要记录的副本。</p>
             </div>
             <button class="button button--quiet" type="button" id="toggle-raid-settings" aria-expanded="true" aria-controls="raid-settings-content">收起设置</button>
@@ -104,7 +133,7 @@
                 <button class="button button--secondary" type="button" id="open-raid-catalog" aria-haspopup="dialog" aria-controls="raid-catalog-dialog">管理副本</button>
               </div>
               <div class="attempt-control">
-                <span>默认次数上限</span>
+                <span>角色单本默认上限</span>
                 <div class="attempt-stepper" aria-label="每副本次数上限">
                   <button type="button" id="decrease-attempts" aria-label="降低次数上限">−</button>
                   <strong id="max-attempts">3</strong>
@@ -116,13 +145,47 @@
           </div>
           <div class="settings-actions">
             <button class="button button--secondary" type="button" id="restore-raids">恢复副本次数</button>
-            <button class="button button--secondary" type="button" id="reset-daily">重置今日进度</button>
           </div>
         </section>
       </div>
+      <footer class="workspace-footer"><span class="local-status" id="storage-status" role="status">正在读取浏览器数据</span></footer>
       <noscript>请在浏览器中启用 JavaScript 后使用晶核助手。</noscript>
     </main>
   </div>
+
+  <dialog class="dialog font-settings-dialog" id="font-settings-dialog" aria-labelledby="font-settings-title">
+    <header class="dialog-header"><h2 id="font-settings-title">字体设置</h2></header>
+    <div class="font-options" role="radiogroup" aria-labelledby="font-settings-title">
+      <label class="font-option">
+        <input type="radio" name="font-preset" value="system" checked>
+        <span><strong>系统默认</strong><small>使用当前设备的系统字体</small></span>
+      </label>
+      <label class="font-option">
+        <input type="radio" name="font-preset" value="rounded">
+        <span><strong>圆润可爱</strong><small>手写风标题，数字圆润</small></span>
+      </label>
+      <label class="font-option">
+        <input type="radio" name="font-preset" value="clear">
+        <span><strong>清爽易读</strong><small>简洁黑体，等宽数字</small></span>
+      </label>
+      <label class="font-option">
+        <input type="radio" name="font-preset" value="journal">
+        <span><strong>手账风</strong><small>宋体标题，柔和的数字字形</small></span>
+      </label>
+    </div>
+    <div class="font-preview" aria-label="字体预览">
+      <div class="font-preview-heading">
+        <strong class="font-preview-title">常规服</strong>
+        <span class="font-preview-details">示例</span>
+      </div>
+      <p>星柚团子 <span class="font-preview-details">等级 <span class="font-preview-value">85</span> · 战力 <span class="font-preview-value">131776</span></span></p>
+      <p class="font-preview-raid"><span>铸骨迷巢</span><span class="font-preview-value">3 / 5</span></p>
+    </div>
+    <p class="font-note" id="font-settings-note" role="status">立即应用，当前浏览器会记住选择。</p>
+    <form class="dialog-actions" method="dialog">
+      <button class="button button--primary" type="submit">完成</button>
+    </form>
+  </dialog>
 
   <dialog class="dialog" id="action-dialog" aria-labelledby="action-title">
     <form id="action-form">
@@ -143,9 +206,84 @@
     </form>
   </dialog>
 
+  <dialog class="dialog" id="sync-dialog" aria-labelledby="sync-title">
+    <div class="dialog-header"><h2 id="sync-title">设备同步</h2></div>
+    <p class="dialog-message">手机和电脑访问同一个网址，用同一个同步密码登录。</p>
+    <p class="dialog-message sync-state" id="sync-state" role="status">正在检查同步状态</p>
+    <form id="sync-setup-form" hidden>
+      <label class="dialog-field" id="sync-setup-code-field" hidden>
+        <span>首次设置验证码</span>
+        <input type="password" id="sync-setup-code" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="dialog-field">
+        <span>设置同步密码</span>
+        <input type="password" id="sync-setup-password" autocomplete="new-password" required>
+      </label>
+      <label class="dialog-field">
+        <span>确认同步密码</span>
+        <input type="password" id="sync-setup-confirm" autocomplete="new-password" required>
+      </label>
+      <p class="dialog-message" id="sync-setup-message" data-state="error" role="status" hidden></p>
+      <div class="dialog-actions">
+        <button class="button button--primary" type="submit">保存并同步</button>
+      </div>
+    </form>
+    <form id="sync-login-form" hidden>
+      <label class="dialog-field">
+        <span>同步密码</span>
+        <input type="password" id="sync-password" autocomplete="current-password" required>
+      </label>
+      <div class="dialog-actions">
+        <button class="button button--primary" type="submit">登录并同步</button>
+      </div>
+    </form>
+    <section class="sync-conflict dialog-section" id="sync-conflict" aria-labelledby="sync-conflict-title" hidden>
+      <h3 id="sync-conflict-title">有记录待确认</h3>
+      <p id="sync-conflict-copy"></p>
+      <ul class="sync-choice-list" id="sync-conflict-list" hidden></ul>
+      <div class="dialog-actions">
+        <button class="button button--primary" type="button" id="sync-conflict-apply" hidden disabled>按所选合并</button>
+        <button class="button button--secondary" type="button" id="sync-conflict-local">冲突项用本机记录</button>
+        <button class="button button--secondary" type="button" id="sync-conflict-remote">冲突项用服务器记录</button>
+      </div>
+      <div class="dialog-actions">
+        <button class="button button--quiet" type="button" id="sync-backup-local">下载本机备份</button>
+      </div>
+    </section>
+    <div class="dialog-section" id="sync-account-actions" hidden>
+      <div class="dialog-actions">
+        <button class="button button--secondary" type="button" id="sync-pull">立即同步</button>
+        <button class="button button--quiet" type="button" id="sync-open-password" aria-expanded="false" aria-controls="sync-password-form">修改同步密码</button>
+        <button class="button button--quiet" type="button" id="sync-logout">退出同步</button>
+      </div>
+      <form id="sync-password-form" hidden>
+        <label class="dialog-field">
+          <span>当前同步密码</span>
+          <input type="password" id="sync-current-password" autocomplete="current-password" required>
+        </label>
+        <label class="dialog-field">
+          <span>新同步密码</span>
+          <input type="password" id="sync-new-password" autocomplete="new-password" required>
+        </label>
+        <label class="dialog-field">
+          <span>确认新密码</span>
+          <input type="password" id="sync-confirm-password" autocomplete="new-password" required>
+        </label>
+        <div class="dialog-actions">
+          <button class="button button--quiet" type="button" id="sync-cancel-password">取消</button>
+          <button class="button button--primary" type="submit">更新密码</button>
+        </div>
+      </form>
+      <p class="dialog-message" id="sync-password-message" role="status" hidden></p>
+    </div>
+    <div class="dialog-actions">
+      <button class="button button--quiet" type="button" id="sync-close">关闭</button>
+    </div>
+  </dialog>
+
   <dialog class="dialog" id="backup-dialog" aria-labelledby="backup-title">
     <div class="dialog-header"><h2 id="backup-title">数据备份与迁移</h2></div>
-    <p class="dialog-message">记录保存在当前浏览器。换设备时可下载备份，在另一台设备导入。</p>
+    <p class="dialog-message">可下载当前记录，也可导入旧网址或其他设备上的 JSON 备份。</p>
     <div class="dialog-section">
       <div class="dialog-actions">
         <button class="button button--secondary" type="button" id="download-backup">下载备份</button>
@@ -187,11 +325,60 @@
     </div>
   </dialog>
 
+  <dialog class="dialog" id="raid-restore-dialog" aria-labelledby="raid-restore-title">
+    <form id="raid-restore-form">
+      <div class="dialog-header"><h2 id="raid-restore-title">恢复副本次数</h2></div>
+      <div class="raid-restore-controls">
+        <label class="dialog-field"><span>账号范围</span><select id="raid-restore-account"></select></label>
+        <label class="dialog-field"><span>团本范围</span><select id="raid-restore-raid"></select></label>
+      </div>
+      <label class="raid-restore-total" id="raid-restore-total-field">
+        <input type="checkbox" id="raid-restore-total" checked> 同时补回账号团本总奖励额度
+      </label>
+      <div class="raid-restore-preview" id="raid-restore-preview" role="status"></div>
+      <p class="dialog-message" id="raid-restore-message" role="status" hidden></p>
+      <div class="dialog-actions">
+        <button class="button button--quiet" type="button" id="close-raid-restore">取消</button>
+        <button class="button button--primary" type="submit" id="confirm-raid-restore" disabled>确认恢复</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog" id="recovery-dialog" aria-labelledby="recovery-title">
+    <div class="dialog-header"><h2 id="recovery-title">恢复点</h2></div>
+    <p class="dialog-message">此浏览器保留最近 8 次批量变更的恢复点。</p>
+    <p class="dialog-message" id="recovery-message" role="status"></p>
+    <div class="recovery-list" id="recovery-list"></div>
+    <div class="dialog-actions"><button class="button button--quiet" type="button" id="close-recovery">关闭</button></div>
+  </dialog>
+
+  <dialog class="dialog" id="raid-quota-dialog" aria-labelledby="raid-quota-title" aria-describedby="raid-quota-description">
+    <form id="raid-quota-form">
+      <div class="dialog-header"><h2 id="raid-quota-title">团本额度</h2></div>
+      <p class="dialog-message" id="raid-quota-description"></p>
+      <div class="quota-edit-fields" id="raid-quota-fields"></div>
+      <p class="dialog-message" id="raid-quota-error" data-state="error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button class="button button--quiet" type="button" id="close-raid-quota">取消</button>
+        <button class="button button--primary" type="submit">保存额度</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog" id="raid-clears-dialog" aria-labelledby="raid-clears-title">
+    <div class="dialog-header"><h2 id="raid-clears-title">通关记录</h2></div>
+    <p class="dialog-message" id="raid-clears-summary" role="status"></p>
+    <ol class="raid-clears-list" id="raid-clears-list" aria-label="今日通关记录"></ol>
+    <div class="dialog-actions">
+      <button class="button button--secondary" type="button" id="close-raid-clears" autofocus>关闭</button>
+    </div>
+  </dialog>
+
   <dialog class="dialog" id="batch-dialog" aria-labelledby="batch-title">
     <form id="batch-form">
       <div class="dialog-header"><h2 id="batch-title">批量记录</h2></div>
       <p class="dialog-message" id="batch-account"></p>
-      <label class="dialog-field">
+      <label class="dialog-field" id="batch-kind-field">
         <span>记录项目</span>
         <select id="batch-kind"></select>
       </label>
@@ -212,44 +399,89 @@
     <p class="dialog-message" id="roster-scope"></p>
     <form id="roster-import-form">
       <section class="roster-section" aria-label="截图识别">
-        <div class="roster-source">
-          <label class="dialog-field" for="roster-image-kind">
-            <span>截图类型</span>
-            <select id="roster-image-kind">
-              <option value="account">账号登录</option>
-              <option value="servers">服务器列表</option>
-              <option value="roles" selected>角色选择</option>
-              <option value="raids">挑战统计</option>
-            </select>
-          </label>
-          <label class="dialog-field" for="roster-screenshot">
-            <span>上传截图</span>
-            <input type="file" id="roster-screenshot" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" multiple>
-          </label>
-        </div>
         <div class="roster-source-actions">
-          <p class="dialog-message">截图在当前浏览器内识别。账号截图仅提取标明的账号，识别后请核对结果。</p>
-          <button class="button button--secondary" type="button" id="recognize-roster">识别截图</button>
+          <button class="button button--primary" type="button" id="roster-paste-image">粘贴截图</button>
+          <button class="button button--secondary" type="button" id="roster-choose-images">上传截图</button>
+          <input type="file" id="roster-screenshot" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" multiple hidden>
         </div>
+        <p class="dialog-message roster-paste-help">也可按 Ctrl+V 或 ⌘V。截图在本机识别，可分别设置导入账号与区服。</p>
+        <div class="roster-image-options" id="roster-image-options" hidden>
+          <div class="roster-image-tools">
+            <p class="dialog-message" id="roster-image-queue" role="status" hidden></p>
+            <label id="roster-batch-kind" hidden>
+              <span>整批类型</span>
+              <select id="roster-image-kind">
+                <option value="" selected disabled>按图设置</option>
+                <option value="roles">角色选择</option>
+                <option value="raids">挑战统计</option>
+                <option value="servers">服务器列表</option>
+                <option value="account">账号登录</option>
+              </select>
+            </label>
+            <button class="button button--quiet" type="button" id="roster-clear-images">清空截图</button>
+          </div>
+          <ul class="roster-images" id="roster-images" aria-label="截图与导入归属" hidden></ul>
+          <div class="roster-recognize-actions">
+            <button class="button button--primary" type="button" id="recognize-roster" disabled>识别截图</button>
+          </div>
+        </div>
+        <template id="roster-image-card">
+          <li class="roster-image-card">
+            <img loading="lazy" decoding="async" alt="">
+            <button class="button roster-image-remove" type="button" data-remove-roster-image>×</button>
+            <select data-roster-kind></select>
+            <label class="roster-image-target"><span>账号</span><input type="text" data-image-account list="roster-account-options" maxlength="40" autocomplete="off" placeholder="沿用默认"></label>
+            <label class="roster-image-target"><span>区服</span><input type="text" data-image-zone maxlength="40" autocomplete="off" placeholder="沿用默认"></label>
+            <datalist data-image-zones></datalist>
+          </li>
+        </template>
         <p class="dialog-message" id="roster-status" role="status" hidden></p>
       </section>
-      <section class="roster-section" aria-label="核对录入内容">
-        <div class="dialog-field">
-          <label for="roster-accounts-text">账号名单</label>
-          <small id="roster-accounts-help">每行一个账号。登录截图会填写识别出的脱敏账号。</small>
-          <textarea id="roster-accounts-text" rows="2" aria-describedby="roster-accounts-help" spellcheck="false"></textarea>
-        </div>
+      <section class="roster-section" aria-label="默认归属与读数">
         <div class="roster-destination">
           <label class="dialog-field" for="roster-account">
-            <span>本批角色归属账号</span>
+            <span>默认账号</span>
             <input type="text" id="roster-account" list="roster-account-options" maxlength="40" autocomplete="off">
           </label>
           <datalist id="roster-account-options"></datalist>
           <label class="dialog-field" for="roster-zone">
-            <span>区服</span>
-            <input type="text" id="roster-zone" list="roster-zone-options" maxlength="40" autocomplete="off">
+            <span>默认区服</span>
+            <input type="text" id="roster-zone" list="roster-zone-options" maxlength="40" autocomplete="off" aria-describedby="roster-zone-help">
           </label>
           <datalist id="roster-zone-options"></datalist>
+        </div>
+        <p class="dialog-message" id="roster-zone-help">服务器列表可识别区服。其他截图可按同一账号下的角色名匹配区服。</p>
+        <div class="dialog-field">
+          <label for="roster-count-basis">读数含义</label>
+          <select id="roster-count-basis" aria-describedby="roster-count-preview-help">
+            <option value="" selected>请选择读数含义</option>
+            <option value="remaining">截图显示剩余次数</option>
+            <option value="used">截图显示已用次数</option>
+          </select>
+          <small id="roster-count-preview-help">例如 3/5，选「已用」会导入为剩余 2 次。</small>
+        </div>
+      </section>
+      <section class="roster-section roster-review" id="roster-ocr-review" aria-labelledby="roster-ocr-title" hidden>
+        <div class="roster-review-heading">
+          <h3 id="roster-ocr-title" tabindex="-1">核对识别结果</h3>
+          <p class="dialog-message" id="roster-review-status" role="status"></p>
+        </div>
+        <p class="dialog-message">点「图」对照原图。可直接改名，也可以选择名单匹配或复扫给出的候选。</p>
+        <figure class="roster-evidence" id="roster-evidence" hidden>
+          <figcaption><span id="roster-evidence-label"></span><button class="button button--quiet" id="roster-evidence-close" type="button">返回该条</button></figcaption>
+          <div class="roster-evidence-image" id="roster-evidence-image">
+            <img id="roster-evidence-preview" decoding="async" alt="">
+          </div>
+        </figure>
+        <div id="roster-review-groups"></div>
+      </section>
+      <details class="roster-section roster-manual" id="roster-manual">
+        <summary>手动录入名单</summary>
+        <div class="roster-manual-fields">
+        <div class="dialog-field">
+          <label for="roster-accounts-text">账号名单</label>
+          <small id="roster-accounts-help">批量创建账号时每行填一个。</small>
+          <textarea id="roster-accounts-text" rows="2" aria-describedby="roster-accounts-help" spellcheck="false"></textarea>
         </div>
         <label class="dialog-field" for="roster-text">
           <span>角色清单</span>
@@ -266,16 +498,13 @@
           <small id="roster-count-help">每行按「角色 | 团本 | 3/5」填写。跨区录入可写「账号 | 区服 | 角色 | 团本 | 3/5」。</small>
           <textarea id="roster-count-text" rows="2" aria-describedby="roster-count-help" spellcheck="false"></textarea>
         </div>
-        <div class="dialog-field">
-          <label for="roster-count-basis">读数含义</label>
-          <select id="roster-count-basis" aria-describedby="roster-count-preview-help">
-            <option value="" selected>请选择读数含义</option>
-            <option value="remaining">截图显示剩余次数</option>
-            <option value="used">截图显示已用次数</option>
-          </select>
-          <small id="roster-count-preview-help">导入只更新预览列出的团本次数。核对后再确认。</small>
+        <div class="dialog-field" id="roster-quota-field" hidden>
+          <label for="roster-quota-text">账号团本额度</label>
+          <small id="roster-quota-help">可填写「团本总奖励次数 | 180/180」或「金权蚀局 | 4/15」。手动填的额度归入默认账号。</small>
+          <textarea id="roster-quota-text" rows="2" aria-describedby="roster-quota-help" spellcheck="false"></textarea>
         </div>
-      </section>
+        </div>
+      </details>
       <div class="roster-preview" id="roster-preview" role="region" aria-label="导入预览" tabindex="0" hidden></div>
       <div class="dialog-actions roster-actions">
         <button class="button button--quiet" type="button" id="close-roster-import">关闭</button>

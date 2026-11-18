@@ -1,0 +1,32 @@
+name: jinghe-assistant
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      JINGHE_ORIGIN: https://${JINGHE_DOMAIN:?Set JINGHE_DOMAIN in .env}
+      JINGHE_SYNC_PASSWORD: ${JINGHE_SYNC_PASSWORD:-}
+      JINGHE_TRUST_PROXY: "1"
+    volumes:
+      - records:/data
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      JINGHE_DOMAIN: ${JINGHE_DOMAIN:?Set JINGHE_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - certificates:/data
+      - caddy-config:/config
+
+volumes:
+  records:
+  certificates:
+  caddy-config:
